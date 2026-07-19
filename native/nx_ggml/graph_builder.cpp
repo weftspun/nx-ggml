@@ -57,6 +57,11 @@ ggml_tensor *GraphBuilder::new_leaf_f32(const std::vector<int64_t> &shape) {
   return ggml_new_tensor(ctx_, GGML_TYPE_F32, GGML_MAX_DIMS, ne.data());
 }
 
+ggml_tensor *GraphBuilder::new_leaf_i32(const std::vector<int64_t> &shape) {
+  auto ne = to_ggml_ne(shape);
+  return ggml_new_tensor(ctx_, GGML_TYPE_I32, GGML_MAX_DIMS, ne.data());
+}
+
 int64_t GraphBuilder::push(ggml_tensor *tensor) {
   nodes_.push_back(tensor);
   return static_cast<int64_t>(nodes_.size() - 1);
@@ -83,6 +88,24 @@ int64_t GraphBuilder::add_constant_f32(const std::vector<int64_t> &shape,
         "nx_ggml: constant binary size does not match shape (expected f32 elements)");
   }
   ggml_tensor *t = new_leaf_f32(shape);
+  pending_constants_.emplace_back(t, data);
+  return push(t);
+}
+
+int64_t GraphBuilder::add_param_i32(const std::vector<int64_t> &shape) {
+  ggml_tensor *t = new_leaf_i32(shape);
+  params_.push_back(t);
+  return push(t);
+}
+
+int64_t GraphBuilder::add_constant_i32(const std::vector<int64_t> &shape,
+                                        const std::string &data) {
+  int64_t n = element_count(shape);
+  if (static_cast<int64_t>(data.size()) != n * static_cast<int64_t>(sizeof(int32_t))) {
+    throw std::invalid_argument(
+        "nx_ggml: constant binary size does not match shape (expected i32 elements)");
+  }
+  ggml_tensor *t = new_leaf_i32(shape);
   pending_constants_.emplace_back(t, data);
   return push(t);
 }
@@ -212,6 +235,16 @@ int64_t GraphBuilder::add_sum_last_axis(int64_t a) {
   return push(result);
 }
 
+int64_t GraphBuilder::add_reduce_max_last_axis(int64_t a, int64_t last_axis_size) {
+  // ggml has no dedicated row-max reduction; a global 1-D max-pool over
+  // the whole ne0 extent (kernel = stride = last_axis_size, no padding)
+  // is exactly a max reduction over ne0, collapsing it to size 1 -- the
+  // same shape contract as add_sum_last_axis.
+  int k0 = static_cast<int>(last_axis_size);
+  ggml_tensor *result = ggml_pool_1d(ctx_, node(a), GGML_OP_POOL_MAX, k0, k0, 0);
+  return push(result);
+}
+
 int64_t GraphBuilder::add_clamp(int64_t a, float min, float max) {
   ggml_tensor *result = ggml_clamp(ctx_, node(a), min, max);
   return push(result);
@@ -222,6 +255,17 @@ int64_t GraphBuilder::add_concat(int64_t a, int64_t b, int64_t axis, int64_t ran
   // (0 = outermost) is ggml dim `rank - 1 - axis` (0 = innermost).
   int dim = static_cast<int>(rank) - 1 - static_cast<int>(axis);
   ggml_tensor *result = ggml_concat(ctx_, node(a), node(b), dim);
+  return push(result);
+}
+
+int64_t GraphBuilder::add_get_rows(int64_t a, int64_t b) {
+  // a: Nx shape (vocab, dim) -> ggml ne=[dim,vocab,1,1]. b: Nx shape (n,)
+  // -> ggml ne=[n,1,1,1] (i32). ggml_get_rows requires a.ne2==b.ne1,
+  // a.ne3==b.ne2, b.ne3==1 -- all satisfied here since both are
+  // effectively rank-2/rank-1 with trailing 1-padding. Result ne =
+  // [a.ne0, b.ne0, b.ne1, b.ne2] = [dim,n,1,1] -> Nx shape (1,1,n,dim);
+  // the caller reshapes down to the expected (n,dim).
+  ggml_tensor *result = ggml_get_rows(ctx_, node(a), node(b));
   return push(result);
 }
 
@@ -295,6 +339,18 @@ int64_t nx_ggml_builder_add_param(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> b
 }
 FINE_NIF(nx_ggml_builder_add_param, 0);
 
+int64_t nx_ggml_builder_add_param_i32(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                       std::vector<int64_t> shape) {
+  return builder->add_param_i32(shape);
+}
+FINE_NIF(nx_ggml_builder_add_param_i32, 0);
+
+int64_t nx_ggml_builder_add_constant_i32(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                          std::vector<int64_t> shape, std::string data) {
+  return builder->add_constant_i32(shape, data);
+}
+FINE_NIF(nx_ggml_builder_add_constant_i32, 0);
+
 int64_t nx_ggml_builder_add_constant_f32(ErlNifEnv *,
                                           fine::ResourcePtr<GraphBuilder> builder,
                                           std::vector<int64_t> shape,
@@ -351,6 +407,13 @@ int64_t nx_ggml_builder_add_sum_last_axis(ErlNifEnv *, fine::ResourcePtr<GraphBu
 }
 FINE_NIF(nx_ggml_builder_add_sum_last_axis, 0);
 
+int64_t nx_ggml_builder_add_reduce_max_last_axis(ErlNifEnv *,
+                                                  fine::ResourcePtr<GraphBuilder> builder,
+                                                  int64_t a, int64_t last_axis_size) {
+  return builder->add_reduce_max_last_axis(a, last_axis_size);
+}
+FINE_NIF(nx_ggml_builder_add_reduce_max_last_axis, 0);
+
 int64_t nx_ggml_builder_add_clamp(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
                                    int64_t a, double min, double max) {
   return builder->add_clamp(a, static_cast<float>(min), static_cast<float>(max));
@@ -362,6 +425,12 @@ int64_t nx_ggml_builder_add_concat(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> 
   return builder->add_concat(a, b, axis, rank);
 }
 FINE_NIF(nx_ggml_builder_add_concat, 0);
+
+int64_t nx_ggml_builder_add_get_rows(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                      int64_t a, int64_t b) {
+  return builder->add_get_rows(a, b);
+}
+FINE_NIF(nx_ggml_builder_add_get_rows, 0);
 
 fine::ResourcePtr<CompiledGraph>
 nx_ggml_builder_finalize(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,

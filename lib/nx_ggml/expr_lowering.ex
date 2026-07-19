@@ -15,6 +15,15 @@ defmodule NxGgml.ExprLowering do
   alias Nx.Defn.Expr
 
   @supported_dtypes [{:f, 32}]
+  # {:s, 32} is only valid for a defn *parameter* that is exclusively used
+  # as :gather's indices operand (see gather_index_positions/1 below) --
+  # never for a bare {:s, 32} :constant. A blanket "any {:s, 32} node is an
+  # index" rule is unsafe: Nx.mean's sum/n decomposition introduces a plain
+  # {:s, 32} :constant divisor (n) that must be treated as ordinary
+  # arithmetic (ggml requires matching operand types, so an i32 constant
+  # divided against an f32 sum aborts the native compute), not as a gather
+  # index just because it happens to share the dtype.
+  @index_dtypes [{:s, 32}]
 
   # Op atom names that map 1:1 onto graph_builder.cpp's add_binary/add_unary
   # dispatch strings (Nx.Defn.Expr's op atoms and ggml's op names happen to
@@ -35,18 +44,71 @@ defmodule NxGgml.ExprLowering do
     check_dtype!(expr.type)
 
     builder = NxGgml.Nif.nx_ggml_builder_new(device)
+    index_positions = gather_index_positions(expr)
 
     param_indices =
-      Enum.map(vars, fn var ->
-        check_dtype!(var.type)
+      Enum.with_index(vars)
+      |> Enum.map(fn {var, pos} ->
         shape = Tuple.to_list(var.shape)
-        NxGgml.Nif.nx_ggml_builder_add_param(builder, shape)
+
+        if pos in index_positions do
+          unless var.type in @index_dtypes do
+            raise NxGgml.UnsupportedDTypeError, type: var.type
+          end
+
+          NxGgml.Nif.nx_ggml_builder_add_param_i32(builder, shape)
+        else
+          check_dtype!(var.type)
+          NxGgml.Nif.nx_ggml_builder_add_param(builder, shape)
+        end
       end)
 
     {output_index, _memo} = lower(builder, expr, param_indices, %{})
     compiled = NxGgml.Nif.nx_ggml_builder_finalize(builder, output_index)
 
     %{compiled: compiled, out_shape: expr.shape, out_type: expr.type}
+  end
+
+  # Pre-scan: collects the positions of top-level parameters that appear
+  # directly as some :gather node's indices argument, so build/1 knows
+  # which params are safe to create as i32 leaves. A parameter position
+  # NOT in this set is always treated as an ordinary f32 compute value
+  # (see @index_dtypes' moduledoc note on why this can't be a blanket
+  # dtype-based rule).
+  defp gather_index_positions(expr) do
+    {_visited, positions} = scan_gather_indices(expr, MapSet.new(), MapSet.new())
+    positions
+  end
+
+  defp scan_gather_indices(%Nx.Tensor{data: %Expr{id: id, op: op, args: args}}, visited, positions) do
+    if MapSet.member?(visited, id) do
+      {visited, positions}
+    else
+      visited = MapSet.put(visited, id)
+
+      positions =
+        case {op, args} do
+          {:gather, [_tensor, %Nx.Tensor{data: %Expr{op: :parameter, args: [pos]}}, _opts]} ->
+            MapSet.put(positions, pos)
+
+          _ ->
+            positions
+        end
+
+      Enum.reduce(args, {visited, positions}, fn
+        %Nx.Tensor{data: %Expr{}} = arg, {v, p} -> scan_gather_indices(arg, v, p)
+        list, {v, p} when is_list(list) -> scan_gather_indices_list(list, v, p)
+        _, acc -> acc
+      end)
+    end
+  end
+
+  defp scan_gather_indices_list(list, visited, positions) do
+    Enum.reduce(list, {visited, positions}, fn
+      %Nx.Tensor{data: %Expr{}} = arg, {v, p} -> scan_gather_indices(arg, v, p)
+      nested, {v, p} when is_list(nested) -> scan_gather_indices_list(nested, v, p)
+      _, acc -> acc
+    end)
   end
 
   defp lower(builder, %Nx.Tensor{data: %Expr{id: id}} = t, param_indices, memo) do
@@ -65,12 +127,20 @@ defmodule NxGgml.ExprLowering do
     {Enum.fetch!(param_indices, pos), memo}
   end
 
+  # A :constant node just holds a plain Elixir number (args: [number]), not
+  # real tensor data, so it's always encoded as f32 here regardless of its
+  # own traced dtype -- e.g. Nx.mean's sum/n decomposition introduces a
+  # {:s, 32} :constant divisor (n) that must still combine with an f32 sum
+  # (ggml requires matching operand types), and re-encoding "3" as f32 3.0
+  # is always numerically valid since it's just a number. This is never in
+  # tension with gather indices, which are real multi-element tensors and
+  # therefore never :constant nodes -- do_lower(:gather, ...) below only
+  # accepts indices that are directly a :parameter.
   defp do_lower(builder, :constant, [number], t, _param_indices, memo) do
-    check_dtype!(t.type)
     shape = Tuple.to_list(t.shape)
 
     binary =
-      %Nx.Tensor{type: t.type, shape: t.shape, names: t.names}
+      %Nx.Tensor{type: {:f, 32}, shape: t.shape, names: t.names}
       |> Nx.BinaryBackend.constant(number, [])
       |> Nx.BinaryBackend.to_binary(Nx.size(t.shape))
 
@@ -185,6 +255,72 @@ defmodule NxGgml.ExprLowering do
       true ->
         raise NxGgml.UnsupportedOpError, op: :sum
     end
+  end
+
+  # Reduction over just the last axis (ggml has no dedicated row-max op,
+  # so this goes through add_reduce_max_last_axis's ggml_pool_1d(MAX)
+  # trick -- see graph_builder.cpp). No general/full-reduction or
+  # multi-axis case is supported (unlike :sum), since a global max-pool
+  # only naturally reduces ne0; anything else falls back to
+  # Nx.Defn.Evaluator. This still has real payoff: reduce_max, subtract,
+  # exp, sum (last axis), and divide are now all independently lowerable,
+  # so a user-composed numerically-stable softmax
+  # (`x |> subtract(reduce_max) |> exp |> then(&(&1 / sum(&1)))`) lowers
+  # entirely through ggml even though Nx has no raw :softmax primitive to
+  # intercept directly.
+  defp do_lower(builder, :reduce_max, [a, opts], t, param_indices, memo) do
+    check_dtype!(t.type)
+    rank = tuple_size(a.shape)
+    axes = opts[:axes]
+
+    unless axes == [rank - 1] do
+      raise NxGgml.UnsupportedOpError, op: :reduce_max
+    end
+
+    {a_index, memo} = lower(builder, a, param_indices, memo)
+    last_axis_size = elem(a.shape, rank - 1)
+    reduced = NxGgml.Nif.nx_ggml_builder_add_reduce_max_last_axis(builder, a_index, last_axis_size)
+    {NxGgml.Nif.nx_ggml_builder_add_reshape(builder, reduced, Tuple.to_list(t.shape)), memo}
+  end
+
+  # Embedding-lookup-style gather only: a 2-D table (vocab, dim), gathering
+  # whole rows (axis 0) by an {:s, 32} index tensor that is *directly* a
+  # defn parameter (matching gather_index_positions/1's pre-scan, which is
+  # what made it safe to create that parameter as an i32 leaf in the first
+  # place) -- maps directly to ggml_get_rows. Nx.gather itself requires
+  # indices' last axis to have length(axes) elements (here: 1), so the
+  # real-world shape is (n, 1), not (n,) -- reshaped down to (n,) before
+  # get_rows, which wants a plain 1-D index list. Nx.gather's fully general
+  # nd-index semantics (multiple coordinate axes at once, or indices
+  # computed from an expression rather than passed in directly) are not
+  # supported; anything outside this specific shape falls back to
+  # Nx.Defn.Evaluator.
+  defp do_lower(builder, :gather, [tensor, indices, opts], t, param_indices, memo) do
+    check_dtype!(t.type)
+
+    n =
+      case indices.shape do
+        {n} -> n
+        {n, 1} -> n
+        _ -> nil
+      end
+
+    valid? =
+      tuple_size(tensor.shape) == 2 and
+        (opts[:axes] == [0] or opts[:axes] == nil) and
+        n != nil and
+        indices.type in @index_dtypes and
+        match?(%Nx.Tensor{data: %Expr{op: :parameter}}, indices)
+
+    unless valid? do
+      raise NxGgml.UnsupportedOpError, op: :gather
+    end
+
+    {tensor_index, memo} = lower(builder, tensor, param_indices, memo)
+    {indices_index, memo} = lower(builder, indices, param_indices, memo)
+    indices_1d = NxGgml.Nif.nx_ggml_builder_add_reshape(builder, indices_index, [n])
+    gathered = NxGgml.Nif.nx_ggml_builder_add_get_rows(builder, tensor_index, indices_1d)
+    {NxGgml.Nif.nx_ggml_builder_add_reshape(builder, gathered, Tuple.to_list(t.shape)), memo}
   end
 
   # Pairwise-folds ggml_concat across an arbitrary-length tensor list (Nx's

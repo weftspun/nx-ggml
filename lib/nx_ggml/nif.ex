@@ -38,6 +38,16 @@ defmodule NxGgml.Nif do
   end
 
   @doc false
+  def nx_ggml_builder_add_param_i32(_builder, _shape) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_constant_i32(_builder, _shape, _data) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
   def nx_ggml_builder_add_binary(_builder, _op, _a, _b) do
     :erlang.nif_error(:nif_not_loaded)
   end
@@ -78,12 +88,22 @@ defmodule NxGgml.Nif do
   end
 
   @doc false
+  def nx_ggml_builder_add_reduce_max_last_axis(_builder, _a, _last_axis_size) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
   def nx_ggml_builder_add_clamp(_builder, _a, _min, _max) do
     :erlang.nif_error(:nif_not_loaded)
   end
 
   @doc false
   def nx_ggml_builder_add_concat(_builder, _a, _b, _axis, _rank) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_get_rows(_builder, _a, _b) do
     :erlang.nif_error(:nif_not_loaded)
   end
 

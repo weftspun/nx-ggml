@@ -27,7 +27,13 @@ layer and `lib/nx_ggml/` for the Elixir side.
 
 ### Dtype support
 
-Only `{:f, 32}` is lowered to ggml today. Every other dtype falls back to `Nx.Defn.Evaluator`.
+`{:f, 32}` for all compute. `{:s, 32}` is also supported, but *only* for a defn parameter that is
+used exclusively as `gather`'s index operand (see below) — never for general arithmetic, and never
+for a bare `{:s, 32}` constant (which is always re-encoded as f32 regardless of its traced dtype,
+since a `:constant` node is just a number, not real tensor data — this is what makes `Nx.mean` work,
+whose `sum/n` decomposition introduces a `{:s, 32}` constant divisor that must still combine with an
+f32 sum). Every other dtype, and any non-gather-index use of `{:s, 32}`, falls back to
+`Nx.Defn.Evaluator`.
 
 ### Op coverage (lowered to ggml; see `lib/nx_ggml/expr_lowering.ex`)
 
@@ -39,17 +45,24 @@ Only `{:f, 32}` is lowered to ggml today. Every other dtype falls back to `Nx.De
   second-to-last axis of `b`, with any number of matching leading batch axes on both operands),
   `sum` (full reduction to scalar, or reduction over just the last axis — the latter also gives
   `Nx.mean` "for free" since it's composed from `sum` + a constant `divide` at the tracing level,
-  not a raw primitive), `clip` (literal/constant bounds only)
+  not a raw primitive), `reduce_max` (last axis only, via `ggml_pool_1d`'s global max-pool — ggml
+  has no dedicated row-max reduction op), `clip` (literal/constant bounds only)
+- **Indexed**: `gather` (embedding-lookup shape only: a 2-D `(vocab, dim)` table, gathering whole
+  rows by an `{:s, 32}` index tensor that is *directly* a defn parameter — not a computed
+  expression, and not Nx's fully general nd-index semantics)
 
-Everything else (comparisons, `pow`, multi-axis (non-last-axis) reductions, `select`/`gather`/
-`indexed_add`/`indexed_put`/`argmax`/`argmin`/`sort`, `triangular_solve`, `fft`/`ifft`,
-per-axis-max reduction (no direct ggml op, blocking a fused numerically-stable `softmax`), the
-generic `reduce` callback with an arbitrary reducer, non-f32 dtypes) currently falls back to
-`Nx.Defn.Evaluator`. Op priority has been grounded in real usage data — tallying `ggml_*` call
-frequency in [trellis2cpp](https://github.com/weftspun/trellis2cpp) (a transformer-heavy
+Because `reduce_max`, `subtract`, `exp`, `sum` (last axis), and `divide` are all independently
+lowerable, a user-composed **numerically-stable softmax** — `x |> subtract(reduce_max(x)) |> exp()
+|> then(&(&1 / sum(&1)))` — lowers entirely through ggml even though Nx has no raw `:softmax`
+primitive for this module to intercept directly.
+
+Everything else (comparisons, `pow`, multi-axis (non-last-axis) reductions, `select`/
+`indexed_add`/`indexed_put`/`argmax`/`argmin`/`sort`, `triangular_solve`, `fft`/`ifft`, general
+nd-gather, the generic `reduce` callback with an arbitrary reducer, non-f32 dtypes) currently falls
+back to `Nx.Defn.Evaluator`. Op priority has been grounded in real usage data — tallying `ggml_*`
+call frequency in [trellis2cpp](https://github.com/weftspun/trellis2cpp) (a transformer-heavy
 image-to-3D ggml pipeline) rather than mechanically working through the full `Nx.Backend` callback
-list — though a full port of a model like trellis2cpp would still need per-axis softmax/norm
-support and `get_rows`-style gather first.
+list.
 
 ## Installation
 

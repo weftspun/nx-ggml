@@ -32,6 +32,11 @@ public:
   int64_t add_param(const std::vector<int64_t> &shape);
   int64_t add_constant_f32(const std::vector<int64_t> &shape,
                             const std::string &data);
+  // i32 leaves are only ever used for gather/get_rows index tensors (all
+  // compute ops require f32 -- see NxGgml.ExprLowering's check_dtype!);
+  // callers must already have converted Nx's index tensor to {:s, 32}.
+  int64_t add_param_i32(const std::vector<int64_t> &shape);
+  int64_t add_constant_i32(const std::vector<int64_t> &shape, const std::string &data);
   int64_t add_binary(const std::string &op, int64_t a, int64_t b);
   int64_t add_unary(const std::string &op, int64_t a);
   // Broadcasts `a` up to `shape` (ggml_repeat); a no-op shape-wise if `a`
@@ -61,10 +66,22 @@ public:
   // false, is just add_reshape to that shape; the sum itself doesn't need
   // to know keep_axes).
   int64_t add_sum_last_axis(int64_t a);
+  // Reduces only the last axis to its max, same shape contract as
+  // add_sum_last_axis. ggml has no dedicated row-max reduction op, so this
+  // is implemented via ggml_pool_1d(GGML_OP_POOL_MAX) with a kernel
+  // spanning the whole last axis (`last_axis_size`, the caller already
+  // knows this from the input tensor's Nx shape) -- a global 1-D max-pool
+  // is exactly a max reduction over ne0.
+  int64_t add_reduce_max_last_axis(int64_t a, int64_t last_axis_size);
   int64_t add_clamp(int64_t a, float min, float max);
   // Concatenates a and b along Nx axis `axis` (reversed to ggml's dim
   // convention internally, same as add_transpose).
   int64_t add_concat(int64_t a, int64_t b, int64_t axis, int64_t rank);
+  // Embedding-lookup-style gather: selects whole rows of a 2-D table `a`
+  // (Nx shape (vocab, dim)) by a 1-D or 2-D integer index tensor `b`
+  // (ggml_get_rows), matching Nx.gather's common single-axis-0,
+  // whole-row-selection case.
+  int64_t add_get_rows(int64_t a, int64_t b);
 
 private:
   friend class CompiledGraph;
@@ -72,6 +89,7 @@ private:
   ggml_tensor *node(int64_t index) const;
   int64_t push(ggml_tensor *tensor);
   ggml_tensor *new_leaf_f32(const std::vector<int64_t> &shape);
+  ggml_tensor *new_leaf_i32(const std::vector<int64_t> &shape);
 
   ggml_context *ctx_;
   ggml_backend_t backend_;

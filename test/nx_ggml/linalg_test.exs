@@ -17,6 +17,19 @@ defmodule NxGgml.LinalgTest do
   defn mean_last_axis(x), do: Nx.mean(x, axes: [-1])
   defn concat2(a, b), do: Nx.concatenate([a, b], axis: 0)
   defn concat3(a, b, c), do: Nx.concatenate([a, b, c], axis: 1)
+  defn reduce_max_last_axis(x), do: Nx.reduce_max(x, axes: [-1])
+
+  # Numerically-stable softmax, composed entirely from primitives Nx has no
+  # raw :softmax node for -- reduce_max, subtract (broadcast), exp, sum
+  # (last axis), divide (broadcast). Proves the composition lowers through
+  # ggml end-to-end even though there's no fused ggml_soft_max call.
+  defn softmax_last_axis(x) do
+    shifted = x - Nx.reduce_max(x, axes: [-1], keep_axes: true)
+    exp = Nx.exp(shifted)
+    exp / Nx.sum(exp, axes: [-1], keep_axes: true)
+  end
+
+  defn embedding_lookup(table, ids), do: Nx.gather(table, ids, axes: [0])
 
   test "2x2 identity matmul is the identity" do
     identity = Nx.tensor([[1.0, 0.0], [0.0, 1.0]], type: :f32)
@@ -109,5 +122,28 @@ defmodule NxGgml.LinalgTest do
     result = assert_matches_evaluator(&concat3/3, [a, b, c])
     assert Nx.shape(result) == {2, 3}
     assert Nx.to_flat_list(result) == [1.0, 3.0, 5.0, 2.0, 4.0, 6.0]
+  end
+
+  test "reduce_max over the last axis matches Nx.Defn.Evaluator" do
+    x = Nx.tensor([[1.0, 5.0, 3.0], [9.0, 2.0, 4.0]], type: :f32)
+    result = assert_matches_evaluator(&reduce_max_last_axis/1, [x])
+    assert Nx.to_flat_list(result) == [5.0, 9.0]
+  end
+
+  test "numerically-stable softmax (composed, no raw :softmax primitive) matches Nx.Defn.Evaluator" do
+    x = Nx.tensor([[1.0, 2.0, 3.0], [1000.0, 1001.0, 1002.0]], type: :f32)
+    result = assert_matches_evaluator(&softmax_last_axis/1, [x], close: true)
+    # Each row's softmax sums to 1.
+    sums = Nx.sum(result, axes: [-1]) |> Nx.to_flat_list()
+    assert_in_delta Enum.at(sums, 0), 1.0, 1.0e-5
+    assert_in_delta Enum.at(sums, 1), 1.0, 1.0e-5
+  end
+
+  test "embedding lookup (gather) matches Nx.Defn.Evaluator" do
+    table = Nx.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], type: :f32)
+    ids = Nx.tensor([[2], [0], [1]], type: :s32)
+    result = assert_matches_evaluator(&embedding_lookup/2, [table, ids])
+    assert Nx.shape(result) == {3, 2}
+    assert Nx.to_flat_list(result) == [5.0, 6.0, 1.0, 2.0, 3.0, 4.0]
   end
 end
