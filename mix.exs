@@ -10,7 +10,9 @@ defmodule NxGgml.MixProject do
       compilers: [:elixir_make] ++ Mix.compilers(),
       make_makefile: "Makefile",
       make_executable: make_executable(),
-      deps: deps()
+      make_env: fn -> %{"FINE_INCLUDE_DIR" => Fine.include_dir()} end,
+      deps: deps(),
+      dialyzer: [plt_add_apps: [:nx, :mix]]
     ]
   end
 
@@ -25,7 +27,10 @@ defmodule NxGgml.MixProject do
   defp deps do
     [
       {:nx, "~> 0.7"},
-      {:elixir_make, "~> 0.7", runtime: false}
+      {:elixir_make, "~> 0.7", runtime: false},
+      {:fine, "~> 0.1", runtime: false},
+      {:stream_data, "~> 1.0", only: :test},
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
   end
 
