@@ -124,6 +124,14 @@ already-supported ops (no new native code beyond `erf` itself):
   values), replayed once per layer with that layer's own weights. This is the complete, real DINOv3
   ViT-L/16 vision encoder running end to end through this backend on real trained weights.
 
+### Formal correctness proofs (Lean 4, test-time only)
+
+`lean/` holds Lean 4 proofs backing nontrivial algebraic claims made by the op lowering — a
+correctness-verification tool, never a runtime dependency (no NIF or `mix compile`/`mix test` step
+touches it). `lean/RopeProof.lean` proves the RoPE "rotate_half via constant matmul" trick used in
+the attention/layer scripts above is exactly correct for every `head_dim` and every input vector, not
+just the specific vectors exercised by the Elixir test suite — see `lean/README.md`.
+
 ## Installation
 
 Not yet published to Hex.

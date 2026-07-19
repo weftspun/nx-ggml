@@ -28,3 +28,7 @@ nx_ggml-*.tar
 /priv/*.dll
 /priv/*.dylib
 
+# Lean 4 build artifacts (test-time correctness proofs, see lean/).
+/lean/.lake/
+/lean/lake-manifest.json
+

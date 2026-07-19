@@ -1,0 +1,5 @@
+name = "nx_ggml_proofs"
+defaultTargets = ["RopeProof"]
+
+[[lean_lib]]
+name = "RopeProof"
