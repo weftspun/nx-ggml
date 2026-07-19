@@ -39,6 +39,11 @@ public:
   int64_t add_constant_i32(const std::vector<int64_t> &shape, const std::string &data);
   int64_t add_binary(const std::string &op, int64_t a, int64_t b);
   int64_t add_unary(const std::string &op, int64_t a);
+  // ggml has no built-in erf op (only the fused gelu_erf activation), so
+  // this wraps the C standard library's erff() as a custom CPU callback
+  // via ggml_map_custom1 -- see graph_builder.cpp for why this is CPU-only
+  // (custom map ops aren't portable to the Vulkan backend).
+  int64_t add_erf(int64_t a);
   // Broadcasts `a` up to `shape` (ggml_repeat); a no-op shape-wise if `a`
   // already has that shape. Used to make every binary op's operands match
   // the node's output shape *before* calling the ggml op, which sidesteps

@@ -113,6 +113,11 @@ defmodule NxGgml.Nif do
   end
 
   @doc false
+  def nx_ggml_builder_add_erf(_builder, _a) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
   def nx_ggml_gguf_read_f32(_path, _tensor_name) do
     :erlang.nif_error(:nif_not_loaded)
   end

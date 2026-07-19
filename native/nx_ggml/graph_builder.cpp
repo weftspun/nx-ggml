@@ -1,5 +1,6 @@
 #include "graph_builder.h"
 
+#include <cmath>
 #include <stdexcept>
 
 #include "ggml-alloc.h"
@@ -158,6 +159,26 @@ int64_t GraphBuilder::add_unary(const std::string &op, int64_t a) {
     throw std::invalid_argument("nx_ggml: unknown unary op '" + op + "'");
   }
 
+  return push(result);
+}
+
+namespace {
+void erf_custom_op(ggml_tensor *dst, const ggml_tensor *a, int ith, int nth, void *) {
+  // Single-threaded (GraphBuilder::add_erf passes n_tasks=1), but written
+  // to tolerate nth>1 defensively: only ith==0 does anything.
+  if (ith != 0) return;
+  int64_t n = ggml_nelements(a);
+  const float *src = static_cast<const float *>(a->data);
+  float *out = static_cast<float *>(dst->data);
+  for (int64_t i = 0; i < n; i++) {
+    out[i] = erff(src[i]);
+  }
+  (void)nth;
+}
+} // namespace
+
+int64_t GraphBuilder::add_erf(int64_t a) {
+  ggml_tensor *result = ggml_map_custom1(ctx_, node(a), erf_custom_op, /*n_tasks=*/1, nullptr);
   return push(result);
 }
 
@@ -379,6 +400,11 @@ int64_t nx_ggml_builder_add_unary(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> b
   return builder->add_unary(op, a);
 }
 FINE_NIF(nx_ggml_builder_add_unary, 0);
+
+int64_t nx_ggml_builder_add_erf(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder, int64_t a) {
+  return builder->add_erf(a);
+}
+FINE_NIF(nx_ggml_builder_add_erf, 0);
 
 int64_t nx_ggml_builder_add_broadcast(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
                                        int64_t a, std::vector<int64_t> shape) {

@@ -63,7 +63,11 @@ defmodule NxGgml.ExprLowering do
         end
       end)
 
-    {output_index, _memo} = lower(builder, expr, param_indices, %{})
+    # :__device__ lives in the same map threaded through every do_lower
+    # clause as the expr-id memo cache, under an atom key that can never
+    # collide with a real expr id (those are integers/refs) -- avoids
+    # widening every do_lower/6 clause's arity just for :erf's device check.
+    {output_index, _memo} = lower(builder, expr, param_indices, %{__device__: device})
     compiled = NxGgml.Nif.nx_ggml_builder_finalize(builder, output_index)
 
     %{compiled: compiled, out_shape: expr.shape, out_type: expr.type}
@@ -160,6 +164,22 @@ defmodule NxGgml.ExprLowering do
     {a_index, memo} = lower(builder, a, param_indices, memo)
     op_name = Atom.to_string(op)
     {NxGgml.Nif.nx_ggml_builder_add_unary(builder, op_name, a_index), memo}
+  end
+
+  # ggml has no standalone erf op (only the fused gelu_erf activation), so
+  # add_erf wraps erff() as a custom ggml_map_custom1 CPU callback --
+  # custom map ops aren't portable to the Vulkan backend, so this only
+  # lowers on a "cpu" device compile; a "vulkan" compile falls back to
+  # Nx.Defn.Evaluator for the whole graph rather than silently miscomputing.
+  defp do_lower(builder, :erf, [a], t, param_indices, memo) do
+    check_dtype!(t.type)
+
+    unless memo[:__device__] == "cpu" do
+      raise NxGgml.UnsupportedOpError, op: :erf
+    end
+
+    {a_index, memo} = lower(builder, a, param_indices, memo)
+    {NxGgml.Nif.nx_ggml_builder_add_erf(builder, a_index), memo}
   end
 
   defp do_lower(builder, :reshape, [a], t, param_indices, memo) do

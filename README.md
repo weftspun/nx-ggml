@@ -38,7 +38,11 @@ f32 sum). Every other dtype, and any non-gather-index use of `{:s, 32}`, falls b
 ### Op coverage (lowered to ggml; see `lib/nx_ggml/expr_lowering.ex`)
 
 - **Elementwise binary**: `add`, `subtract`, `multiply`, `divide` (broadcasting supported)
-- **Elementwise unary**: `negate`, `abs`, `sign`, `sqrt`, `exp`, `log`, `sigmoid`, `tanh`, `sin`, `cos`
+- **Elementwise unary**: `negate`, `abs`, `sign`, `sqrt`, `exp`, `log`, `sigmoid`, `tanh`, `sin`, `cos`,
+  `erf` (CPU only — ggml has no standalone erf op, only the fused `gelu_erf` activation, so this
+  wraps the C standard library's `erff()` as a custom `ggml_map_custom1` callback; custom map ops
+  aren't portable to the Vulkan backend, so an `erf`-containing graph compiled for `:vulkan` falls
+  back to `Nx.Defn.Evaluator` instead of silently miscomputing)
 - **Shape**: `reshape`, `squeeze`, `transpose` (any rank ≤ 4, arbitrary permutation), `broadcast`
   (trailing-aligned case only), `concatenate` (any number of tensors, any axis)
 - **Linear algebra**: `dot` (matmul, optionally batched — contract the last axis of `a` with the
@@ -84,6 +88,19 @@ port. This is real evidence the architecture and op lowering are correct against
 model, not just synthetic op tests — see the project plan for the full writeup, including how the
 weights were obtained (an ungated Hugging Face mirror, since the official DINOv3 checkpoint is
 license-gated) and the download/conversion/reference-generation steps.
+
+Two further layer-0 stages have since been validated the same way, composed entirely from
+already-supported ops (no new native code beyond `erf` itself):
+
+- **`norm1`** (`scratch_dino_norm1.exs`, standard affine LayerNorm, composed from `mean`/`subtract`/
+  `multiply`/`sqrt`/`divide`): max abs diff `3.8e-6`, **0 / 1,053,696** elements fail the gate — a
+  clean pass.
+- **`mlp`** (`scratch_dino_mlp.exs`, `up_proj` matmul+bias → exact erf-based GELU → `down_proj`
+  matmul+bias, checked against the real `l0.mlp` tap): max abs diff `0.0039`, mean abs error `3.5e-7`,
+  **0 / 1,053,696** elements fail the gate. This is the first validation to exercise the new `erf` op
+  (`ggml_map_custom1` wrapping `erff()`, since ggml has no standalone erf op) — GELU has no other
+  lowerable formulation in this backend, so this is real evidence the custom-op escape hatch works
+  correctly against real weights, not just a synthetic case.
 
 ## Installation
 
