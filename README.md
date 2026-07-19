@@ -20,9 +20,10 @@ CPU or Vulkan GPU compute.
 
 ## Status
 
-CPU path working end-to-end (Vulkan not yet enabled — Phase 7). Any op or dtype not yet lowered
-falls back to `Nx.Defn.Evaluator` automatically, so nothing breaks; op coverage grows over time.
-See `native/nx_ggml/` for the C/NIF layer and `lib/nx_ggml/` for the Elixir side.
+CPU and Vulkan GPU paths both working end-to-end, including real GPU-trained gradient descent
+(tested on an NVIDIA RTX 4090). Any op or dtype not yet lowered falls back to `Nx.Defn.Evaluator`
+automatically, so nothing breaks; op coverage grows over time. See `native/nx_ggml/` for the C/NIF
+layer and `lib/nx_ggml/` for the Elixir side.
 
 ### Dtype support
 
@@ -33,17 +34,22 @@ Only `{:f, 32}` is lowered to ggml today. Every other dtype falls back to `Nx.De
 - **Elementwise binary**: `add`, `subtract`, `multiply`, `divide` (broadcasting supported)
 - **Elementwise unary**: `negate`, `abs`, `sign`, `sqrt`, `exp`, `log`, `sigmoid`, `tanh`, `sin`, `cos`
 - **Shape**: `reshape`, `squeeze`, `transpose` (any rank ≤ 4, arbitrary permutation), `broadcast`
-  (trailing-aligned case only)
-- **Linear algebra**: `dot` (standard 2-D matmul only: contract `a`'s last axis with `b`'s first
-  axis, no batch dims), `sum` (full reduction to scalar only), `clip` (literal/constant bounds only)
+  (trailing-aligned case only), `concatenate` (any number of tensors, any axis)
+- **Linear algebra**: `dot` (matmul, optionally batched — contract the last axis of `a` with the
+  second-to-last axis of `b`, with any number of matching leading batch axes on both operands),
+  `sum` (full reduction to scalar, or reduction over just the last axis — the latter also gives
+  `Nx.mean` "for free" since it's composed from `sum` + a constant `divide` at the tracing level,
+  not a raw primitive), `clip` (literal/constant bounds only)
 
-Everything else (comparisons, `pow`, multi-axis reductions, batched/higher-rank `dot`,
-`select`/`gather`/`indexed_add`/`indexed_put`/`argmax`/`argmin`/`sort`, `triangular_solve`,
-`fft`/`ifft`, the generic `reduce` callback with an arbitrary reducer, non-f32 dtypes) currently
-falls back to `Nx.Defn.Evaluator`. Op priority so far has been grounded in real usage data —
-tallying `ggml_*` call frequency in [trellis2cpp](https://github.com/weftspun/trellis2cpp) (a
-transformer-heavy image-to-3D ggml pipeline) rather than mechanically working through the full
-`Nx.Backend` callback list.
+Everything else (comparisons, `pow`, multi-axis (non-last-axis) reductions, `select`/`gather`/
+`indexed_add`/`indexed_put`/`argmax`/`argmin`/`sort`, `triangular_solve`, `fft`/`ifft`,
+per-axis-max reduction (no direct ggml op, blocking a fused numerically-stable `softmax`), the
+generic `reduce` callback with an arbitrary reducer, non-f32 dtypes) currently falls back to
+`Nx.Defn.Evaluator`. Op priority has been grounded in real usage data — tallying `ggml_*` call
+frequency in [trellis2cpp](https://github.com/weftspun/trellis2cpp) (a transformer-heavy
+image-to-3D ggml pipeline) rather than mechanically working through the full `Nx.Backend` callback
+list — though a full port of a model like trellis2cpp would still need per-axis softmax/norm
+support and `get_rows`-style gather first.
 
 ## Installation
 

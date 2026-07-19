@@ -45,13 +45,26 @@ public:
   // row-major axis numbering) -- see the .cpp for the ne[]-reversal
   // mapping into ggml_permute's argument convention.
   int64_t add_transpose(int64_t a, const std::vector<int64_t> &axes);
-  // Standard 2-D matmul: a is Nx shape (m,k), b is Nx shape (k,n), result
-  // is Nx shape (m,n) -- see the .cpp for the ggml_mul_mat operand-order
-  // derivation (this is the ne[]-convention risk area for matmul).
-  int64_t add_matmul_2d(int64_t a, int64_t b);
+  // a is Nx shape (...batch, m, k), b is Nx shape (...batch, k, n), result
+  // is Nx shape (...batch, m, n) -- batch dims (if any) are handled for
+  // free by ggml_mul_mat's own ne2/ne3 ("t1 broadcastable to t0") ,
+  // handling, since Nx's leading axes already land in ggml's ne2/ne3 slots
+  // via the same reversal to_ggml_ne always applies. See the .cpp for the
+  // ggml_mul_mat operand-order derivation (the ne[]-convention risk area
+  // for matmul).
+  int64_t add_matmul(int64_t a, int64_t b);
   // Full reduction to a 0-d (scalar) tensor.
   int64_t add_sum_all(int64_t a);
+  // Reduces only the last (fastest-varying / ne0) axis, keeping it as a
+  // trailing size-1 dim (ggml_sum_rows) -- the caller reshapes to the
+  // desired final shape (dropping the axis entirely, i.e. keep_axes:
+  // false, is just add_reshape to that shape; the sum itself doesn't need
+  // to know keep_axes).
+  int64_t add_sum_last_axis(int64_t a);
   int64_t add_clamp(int64_t a, float min, float max);
+  // Concatenates a and b along Nx axis `axis` (reversed to ggml's dim
+  // convention internally, same as add_transpose).
+  int64_t add_concat(int64_t a, int64_t b, int64_t axis, int64_t rank);
 
 private:
   friend class CompiledGraph;

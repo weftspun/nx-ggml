@@ -134,29 +134,73 @@ defmodule NxGgml.ExprLowering do
     {NxGgml.Nif.nx_ggml_builder_add_broadcast(builder, a_index, Tuple.to_list(shape)), memo}
   end
 
-  # Only the standard 2-D matmul case (contract a's last axis with b's
-  # first axis, no batch dims) is lowered — the common case per real-world
-  # usage (linear layers, attention). Batched/higher-rank contractions fall
-  # back to Nx.Defn.Evaluator.
-  defp do_lower(builder, :dot, [a, [1], [], b, [0], []], t, param_indices, memo)
-       when tuple_size(a.shape) == 2 and tuple_size(b.shape) == 2 do
+  # Standard (optionally batched) matmul: contract a's last axis with b's
+  # second-to-last axis, with any number of matching leading batch axes on
+  # both operands (the common case for linear layers/attention/per-batch
+  # matmul; the top real-world op per trellis2cpp's usage data). Anything
+  # else (mismatched batch axes, non-trailing contraction axes) falls back
+  # to Nx.Defn.Evaluator.
+  defp do_lower(builder, :dot, [a, c1, b1, b, c2, b2], t, param_indices, memo) do
     check_dtype!(t.type)
-    {a_index, memo} = lower(builder, a, param_indices, memo)
-    {b_index, memo} = lower(builder, b, param_indices, memo)
-    {NxGgml.Nif.nx_ggml_builder_add_matmul_2d(builder, a_index, b_index), memo}
-  end
+    rank_a = tuple_size(a.shape)
+    rank_b = tuple_size(b.shape)
+    batch_axes = Enum.to_list(0..(rank_a - 3)//1)
 
-  # Full-reduction sum only (no :axes, not :keep_axes) -> a 0-d (scalar)
-  # result. Multi-axis/keep-axes reductions fall back to Nx.Defn.Evaluator.
-  defp do_lower(builder, :sum, [a, opts], t, param_indices, memo) do
-    check_dtype!(t.type)
+    standard_batched_matmul? =
+      rank_a == rank_b and rank_a >= 2 and c1 == [rank_a - 1] and c2 == [rank_b - 2] and
+        b1 == batch_axes and b2 == batch_axes
 
-    unless t.shape == {} and (opts[:axes] == nil or opts[:axes] == []) and !opts[:keep_axes] do
-      raise NxGgml.UnsupportedOpError, op: :sum
+    unless standard_batched_matmul? do
+      raise NxGgml.UnsupportedOpError, op: :dot
     end
 
     {a_index, memo} = lower(builder, a, param_indices, memo)
-    {NxGgml.Nif.nx_ggml_builder_add_sum_all(builder, a_index), memo}
+    {b_index, memo} = lower(builder, b, param_indices, memo)
+    {NxGgml.Nif.nx_ggml_builder_add_matmul(builder, a_index, b_index), memo}
+  end
+
+  # Full-reduction (no :axes, not :keep_axes) -> 0-d scalar, or reduction
+  # over just the last axis (either form of :keep_axes, since the sum
+  # itself doesn't need to know -- the final add_reshape to t.shape handles
+  # keep_axes/squeeze either way). Any other axes combination falls back to
+  # Nx.Defn.Evaluator. Last-axis support also unlocks Nx.mean "for free" for
+  # the same case, since Nx.mean is itself composed from sum + a constant
+  # divide (both independently supported) at the Nx.Defn tracing level, not
+  # a raw :mean primitive.
+  defp do_lower(builder, :sum, [a, opts], t, param_indices, memo) do
+    check_dtype!(t.type)
+    rank = tuple_size(a.shape)
+    axes = opts[:axes]
+
+    cond do
+      t.shape == {} and (axes == nil or axes == []) ->
+        {a_index, memo} = lower(builder, a, param_indices, memo)
+        {NxGgml.Nif.nx_ggml_builder_add_sum_all(builder, a_index), memo}
+
+      axes == [rank - 1] ->
+        {a_index, memo} = lower(builder, a, param_indices, memo)
+        summed = NxGgml.Nif.nx_ggml_builder_add_sum_last_axis(builder, a_index)
+        {NxGgml.Nif.nx_ggml_builder_add_reshape(builder, summed, Tuple.to_list(t.shape)), memo}
+
+      true ->
+        raise NxGgml.UnsupportedOpError, op: :sum
+    end
+  end
+
+  # Pairwise-folds ggml_concat across an arbitrary-length tensor list (Nx's
+  # :concatenate always carries the full list + axis, but ggml_concat only
+  # takes two operands at a time).
+  defp do_lower(builder, :concatenate, [tensors, axis], t, param_indices, memo) do
+    check_dtype!(t.type)
+    rank = tuple_size(t.shape)
+
+    [first | rest] = tensors
+    {first_index, memo} = lower(builder, first, param_indices, memo)
+
+    Enum.reduce(rest, {first_index, memo}, fn tensor, {acc_index, acc_memo} ->
+      {tensor_index, acc_memo} = lower(builder, tensor, param_indices, acc_memo)
+      {NxGgml.Nif.nx_ggml_builder_add_concat(builder, acc_index, tensor_index, axis, rank), acc_memo}
+    end)
   end
 
   # Only literal (compile-time-constant) min/max bounds are lowered, via
