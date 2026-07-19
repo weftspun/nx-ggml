@@ -44,6 +44,13 @@ public:
   // row-major axis numbering) -- see the .cpp for the ne[]-reversal
   // mapping into ggml_permute's argument convention.
   int64_t add_transpose(int64_t a, const std::vector<int64_t> &axes);
+  // Standard 2-D matmul: a is Nx shape (m,k), b is Nx shape (k,n), result
+  // is Nx shape (m,n) -- see the .cpp for the ggml_mul_mat operand-order
+  // derivation (this is the ne[]-convention risk area for matmul).
+  int64_t add_matmul_2d(int64_t a, int64_t b);
+  // Full reduction to a 0-d (scalar) tensor.
+  int64_t add_sum_all(int64_t a);
+  int64_t add_clamp(int64_t a, float min, float max);
 
 private:
   friend class CompiledGraph;

@@ -176,6 +176,36 @@ int64_t GraphBuilder::add_transpose(int64_t a, const std::vector<int64_t> &axes)
   return push(result);
 }
 
+int64_t GraphBuilder::add_matmul_2d(int64_t a, int64_t b) {
+  // a is Nx shape (m,k) -> ggml ne=[k,m] (to_ggml_ne reverses); this is
+  // already exactly the shape ggml_mul_mat wants for its *second* argument.
+  // b is Nx shape (k,n) -> ggml ne=[n,k]; ggml_mul_mat requires both
+  // operands to share ne0 (the contraction dim, k), so b must be
+  // transposed first: transpose(b) is Nx shape (n,k) -> ggml ne=[k,n].
+  //
+  // ggml_mul_mat(ctx, X, Y) requires X.ne0 == Y.ne0 and produces a result
+  // with ne0 = X.ne1, ne1 = Y.ne1. Calling ggml_mul_mat(ctx, transpose(b),
+  // a) therefore gives X.ne1 = n, Y.ne1 = m -> result ne=[n,m] -> Nx shape
+  // (reversed) = (m,n), which is the standard matmul result shape. This
+  // was derived from ggml's ne[]/mul_mat convention and confirmed against
+  // Nx.BinaryBackend with a hand-picked asymmetric matrix (see
+  // shape_ops_test.exs) rather than trusted from memory alone -- exactly
+  // the row-major/ggml-ne[]-convention risk flagged for matmul.
+  ggml_tensor *b_t = ggml_cont(ctx_, ggml_transpose(ctx_, node(b)));
+  ggml_tensor *result = ggml_mul_mat(ctx_, b_t, node(a));
+  return push(result);
+}
+
+int64_t GraphBuilder::add_sum_all(int64_t a) {
+  ggml_tensor *result = ggml_sum(ctx_, node(a));
+  return push(result);
+}
+
+int64_t GraphBuilder::add_clamp(int64_t a, float min, float max) {
+  ggml_tensor *result = ggml_clamp(ctx_, node(a), min, max);
+  return push(result);
+}
+
 CompiledGraph::CompiledGraph(GraphBuilder &builder, int64_t output_index) {
   output_ = builder.node(output_index);
 
@@ -282,6 +312,24 @@ int64_t nx_ggml_builder_add_transpose(ErlNifEnv *, fine::ResourcePtr<GraphBuilde
   return builder->add_transpose(a, axes);
 }
 FINE_NIF(nx_ggml_builder_add_transpose, 0);
+
+int64_t nx_ggml_builder_add_matmul_2d(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                      int64_t a, int64_t b) {
+  return builder->add_matmul_2d(a, b);
+}
+FINE_NIF(nx_ggml_builder_add_matmul_2d, 0);
+
+int64_t nx_ggml_builder_add_sum_all(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                     int64_t a) {
+  return builder->add_sum_all(a);
+}
+FINE_NIF(nx_ggml_builder_add_sum_all, 0);
+
+int64_t nx_ggml_builder_add_clamp(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                   int64_t a, double min, double max) {
+  return builder->add_clamp(a, static_cast<float>(min), static_cast<float>(max));
+}
+FINE_NIF(nx_ggml_builder_add_clamp, 0);
 
 fine::ResourcePtr<CompiledGraph>
 nx_ggml_builder_finalize(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,

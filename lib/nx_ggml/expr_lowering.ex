@@ -133,9 +133,51 @@ defmodule NxGgml.ExprLowering do
     {NxGgml.Nif.nx_ggml_builder_add_broadcast(builder, a_index, Tuple.to_list(shape)), memo}
   end
 
+  # Only the standard 2-D matmul case (contract a's last axis with b's
+  # first axis, no batch dims) is lowered — the common case per real-world
+  # usage (linear layers, attention). Batched/higher-rank contractions fall
+  # back to Nx.Defn.Evaluator.
+  defp do_lower(builder, :dot, [a, [1], [], b, [0], []], t, param_indices, memo)
+       when tuple_size(a.shape) == 2 and tuple_size(b.shape) == 2 do
+    check_dtype!(t.type)
+    {a_index, memo} = lower(builder, a, param_indices, memo)
+    {b_index, memo} = lower(builder, b, param_indices, memo)
+    {NxGgml.Nif.nx_ggml_builder_add_matmul_2d(builder, a_index, b_index), memo}
+  end
+
+  # Full-reduction sum only (no :axes, not :keep_axes) -> a 0-d (scalar)
+  # result. Multi-axis/keep-axes reductions fall back to Nx.Defn.Evaluator.
+  defp do_lower(builder, :sum, [a, opts], t, param_indices, memo) do
+    check_dtype!(t.type)
+
+    unless t.shape == {} and (opts[:axes] == nil or opts[:axes] == []) and !opts[:keep_axes] do
+      raise NxGgml.UnsupportedOpError, op: :sum
+    end
+
+    {a_index, memo} = lower(builder, a, param_indices, memo)
+    {NxGgml.Nif.nx_ggml_builder_add_sum_all(builder, a_index), memo}
+  end
+
+  # Only literal (compile-time-constant) min/max bounds are lowered, via
+  # ggml_clamp; tensor-valued bounds fall back to Nx.Defn.Evaluator.
+  defp do_lower(builder, :clip, [a, min, max], t, param_indices, memo) do
+    check_dtype!(t.type)
+
+    with {:ok, min_value} <- literal_constant(min),
+         {:ok, max_value} <- literal_constant(max) do
+      {a_index, memo} = lower(builder, a, param_indices, memo)
+      {NxGgml.Nif.nx_ggml_builder_add_clamp(builder, a_index, min_value * 1.0, max_value * 1.0), memo}
+    else
+      :error -> raise NxGgml.UnsupportedOpError, op: :clip
+    end
+  end
+
   defp do_lower(_builder, op, _args, _t, _param_indices, _memo) do
     raise NxGgml.UnsupportedOpError, op: op
   end
+
+  defp literal_constant(%Nx.Tensor{data: %Expr{op: :constant, args: [number]}}), do: {:ok, number}
+  defp literal_constant(_), do: :error
 
   # Lowers `operand` and, if its shape doesn't already match `target_shape`,
   # wraps it in an explicit ggml_repeat broadcast. Applying this uniformly

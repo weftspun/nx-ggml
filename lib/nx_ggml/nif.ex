@@ -58,6 +58,21 @@ defmodule NxGgml.Nif do
   end
 
   @doc false
+  def nx_ggml_builder_add_matmul_2d(_builder, _a, _b) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_sum_all(_builder, _a) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_clamp(_builder, _a, _min, _max) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
   def nx_ggml_builder_finalize(_builder, _output_index) do
     :erlang.nif_error(:nif_not_loaded)
   end
