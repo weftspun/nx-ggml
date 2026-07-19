@@ -1,21 +1,23 @@
 defmodule NxGgml.GraphCache do
   @moduledoc """
-  Caches lowered ggml graphs (`NxGgml.ExprLowering.build/2` results) keyed
-  by `{defn key, input shapes, input dtypes}` (the `key` opaque term
-  `Nx.Defn.Compiler` callbacks receive does not itself vary with input
-  shapes/dtypes, so it must be combined with those here — see the
-  `Nx.Defn.Compiler.__compile__/4` docs).
+  Caches lowered ggml graphs (`NxGgml.ExprLowering.build/3` results) keyed
+  by `{defn key, input shapes, input dtypes, device}` (the `key` opaque
+  term `Nx.Defn.Compiler` callbacks receive does not itself vary with
+  input shapes/dtypes/device, so it must be combined with those here — see
+  the `Nx.Defn.Compiler.__compile__/4` docs). Device is part of the key so
+  the same traced function compiled for `:cpu` and `:vulkan` gets two
+  independent cached graphs, not one clobbering the other.
 
   Backed by `:persistent_term`: compiled graphs are read on every call and
-  written rarely (once per unique shape/dtype signature), which is exactly
-  the read-mostly access pattern `:persistent_term` is for. This is the
-  tinygrad-`TinyJit`/EXLA-executable-cache pattern: trace + lower once per
-  signature, then only re-run the cached native graph on repeat calls.
+  written rarely (once per unique shape/dtype/device signature), which is
+  exactly the read-mostly access pattern `:persistent_term` is for. This is
+  the tinygrad-`TinyJit`/EXLA-executable-cache pattern: trace + lower once
+  per signature, then only re-run the cached native graph on repeat calls.
   """
 
-  @doc "Builds a cache key from the compiler's opaque `key` and the traced `vars`."
-  def key(key, vars) do
-    {key, Enum.map(vars, &{&1.shape, &1.type})}
+  @doc "Builds a cache key from the compiler's opaque `key`, the traced `vars`, and the device."
+  def key(key, vars, device) do
+    {key, Enum.map(vars, &{&1.shape, &1.type}), device}
   end
 
   @doc "Looks up a previously-cached lowered graph, or `:error` on a miss."

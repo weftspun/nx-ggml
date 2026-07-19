@@ -18,7 +18,12 @@ defmodule NxGgml.Nif do
   end
 
   @doc false
-  def nx_ggml_builder_new do
+  def nx_ggml_builder_new(_device) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_vulkan_available do
     :erlang.nif_error(:nif_not_loaded)
   end
 

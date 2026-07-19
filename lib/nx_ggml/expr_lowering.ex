@@ -24,16 +24,17 @@ defmodule NxGgml.ExprLowering do
 
   @doc """
   Lowers `expr` (the result of tracing a defn function with `vars` as
-  inputs) into a compiled ggml graph.
+  inputs) into a compiled ggml graph, allocated on `device` (`"cpu"` or
+  `"vulkan"`, per `NxGgml.Device.from_opts/1`).
 
   Returns `%{compiled: compiled_ref, out_shape: shape, out_type: type}`.
   Raises `NxGgml.UnsupportedOpError` or `NxGgml.UnsupportedDTypeError` if
   `expr` uses anything outside the currently-supported subset.
   """
-  def build(vars, expr) do
+  def build(vars, expr, device) do
     check_dtype!(expr.type)
 
-    builder = NxGgml.Nif.nx_ggml_builder_new()
+    builder = NxGgml.Nif.nx_ggml_builder_new(device)
 
     param_indices =
       Enum.map(vars, fn var ->

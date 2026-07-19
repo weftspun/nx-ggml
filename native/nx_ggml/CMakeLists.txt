@@ -46,8 +46,17 @@ set_target_properties(nx_ggml_nif PROPERTIES
 )
 target_include_directories(nx_ggml_nif PRIVATE "${ERTS_INCLUDE_DIR}" "${FINE_INCLUDE_DIR}")
 # ggml is linked statically (BUILD_SHARED_LIBS=OFF above), so the NIF
-# shared library is fully self-contained.
+# shared library is fully self-contained. The `ggml` umbrella target
+# already aggregates whichever backends were enabled (CPU always, Vulkan
+# when NX_GGML_VULKAN=ON), so no separate ggml-vulkan link is needed.
 target_link_libraries(nx_ggml_nif PRIVATE ggml)
+
+if(NX_GGML_VULKAN)
+    # Lets nx_ggml_nif.cpp's Vulkan backend-selection code compile only
+    # when it was actually built in -- calling ggml_backend_vk_init would
+    # otherwise be a link error against a CPU-only ggml build.
+    target_compile_definitions(nx_ggml_nif PRIVATE NX_GGML_HAVE_VULKAN=1)
+endif()
 
 if(NOT MSVC)
     target_compile_options(nx_ggml_nif PRIVATE -fvisibility=hidden)

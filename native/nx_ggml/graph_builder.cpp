@@ -32,7 +32,9 @@ int64_t element_count(const std::vector<int64_t> &shape) {
 
 } // namespace
 
-GraphBuilder::GraphBuilder() {
+GraphBuilder::GraphBuilder(const std::string &device) {
+  backend_ = nx_ggml_backend_for(device);
+
   struct ggml_init_params params = {
       /*.mem_size   =*/ggml_tensor_overhead() * 1024 + ggml_graph_overhead(),
       /*.mem_buffer =*/nullptr,
@@ -213,7 +215,7 @@ CompiledGraph::CompiledGraph(GraphBuilder &builder, int64_t output_index) {
   ggml_build_forward_expand(graph, output_);
 
   ggml_backend_buffer_t buffer =
-      ggml_backend_alloc_ctx_tensors(builder.ctx_, nx_ggml_cpu_backend());
+      ggml_backend_alloc_ctx_tensors(builder.ctx_, builder.backend_);
   if (!buffer) {
     throw std::runtime_error("nx_ggml: ggml_backend_alloc_ctx_tensors failed");
   }
@@ -223,9 +225,10 @@ CompiledGraph::CompiledGraph(GraphBuilder &builder, int64_t output_index) {
                              pending.second.size());
   }
 
-  // Take ownership of the builder's context/graph; GraphBuilder's
+  // Take ownership of the builder's context/graph/backend; GraphBuilder's
   // destructor becomes a no-op once ctx_ is nulled out here.
   ctx_ = builder.ctx_;
+  backend_ = builder.backend_;
   buffer_ = buffer;
   graph_ = graph;
   params_ = builder.params_;
@@ -251,7 +254,7 @@ std::string CompiledGraph::run(const std::vector<std::string> &inputs) {
     ggml_backend_tensor_set(params_[i], inputs[i].data(), 0, inputs[i].size());
   }
 
-  enum ggml_status status = ggml_backend_graph_compute(nx_ggml_cpu_backend(), graph_);
+  enum ggml_status status = ggml_backend_graph_compute(backend_, graph_);
   if (status != GGML_STATUS_SUCCESS) {
     throw std::runtime_error("nx_ggml: ggml_backend_graph_compute failed");
   }
@@ -264,8 +267,8 @@ std::string CompiledGraph::run(const std::vector<std::string> &inputs) {
 FINE_RESOURCE(GraphBuilder);
 FINE_RESOURCE(CompiledGraph);
 
-fine::ResourcePtr<GraphBuilder> nx_ggml_builder_new(ErlNifEnv *) {
-  return fine::make_resource<GraphBuilder>();
+fine::ResourcePtr<GraphBuilder> nx_ggml_builder_new(ErlNifEnv *, std::string device) {
+  return fine::make_resource<GraphBuilder>(device);
 }
 FINE_NIF(nx_ggml_builder_new, 0);
 

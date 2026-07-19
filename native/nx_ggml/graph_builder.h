@@ -22,10 +22,11 @@
 #include <ggml.h>
 
 ggml_backend_t nx_ggml_cpu_backend();
+ggml_backend_t nx_ggml_backend_for(const std::string &device);
 
 class GraphBuilder {
 public:
-  GraphBuilder();
+  explicit GraphBuilder(const std::string &device);
   ~GraphBuilder();
 
   int64_t add_param(const std::vector<int64_t> &shape);
@@ -60,6 +61,7 @@ private:
   ggml_tensor *new_leaf_f32(const std::vector<int64_t> &shape);
 
   ggml_context *ctx_;
+  ggml_backend_t backend_;
   std::vector<ggml_tensor *> nodes_;
   std::vector<ggml_tensor *> params_;
   std::vector<std::pair<ggml_tensor *, std::string>> pending_constants_;
@@ -74,6 +76,7 @@ public:
 
 private:
   ggml_context *ctx_;
+  ggml_backend_t backend_;
   ggml_backend_buffer_t buffer_;
   ggml_cgraph *graph_;
   std::vector<ggml_tensor *> params_;

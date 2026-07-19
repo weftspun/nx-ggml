@@ -14,18 +14,23 @@ defmodule NxGgml.Compiler do
   gradient rules already in Nx core, so this module never needs to
   implement backward passes.
 
-  ## Phase 3 status
-
-  `NxGgml.ExprLowering` lowers a real (but intentionally small) subset of
-  ops for real: `:parameter`, `:constant`, `:add`, f32 only, and only when
-  the traced function returns a single tensor (not yet a tuple/map of
-  tensors). Anything outside that subset — an unimplemented op, an
-  unsupported dtype, or a composite (non-single-tensor) output — raises
+  `NxGgml.ExprLowering` lowers a real but intentionally partial op/dtype
+  subset (see its moduledoc), and only when the traced function returns a
+  single tensor (not yet a tuple/map of tensors). Anything outside that
+  subset — an unimplemented op, an unsupported dtype, or a composite
+  (non-single-tensor) output — raises
   `NxGgml.UnsupportedOpError`/`NxGgml.UnsupportedDTypeError`, which this
   module catches and falls back to `Nx.Defn.Evaluator` (Nx's own
   backend-agnostic tree-walking interpreter). This fallback is explicit and
-  intentional, not silent: it's how Phases 4-6 broaden real ggml coverage
+  intentional, not silent: it's how real ggml coverage broadens
   incrementally without ever leaving a `defn` unable to run.
+
+  ## Device selection
+
+  Pass `device: :cpu` (default) or `device: :vulkan` as a compiler option
+  (see `NxGgml.Device`) to choose which ggml backend a graph runs on.
+  `:vulkan` requires a build configured with `NX_GGML_VULKAN=ON` and a
+  Vulkan-capable GPU found at NIF load (`NxGgml.Device.vulkan_available?/0`).
   """
 
   @behaviour Nx.Defn.Compiler
@@ -43,7 +48,8 @@ defmodule NxGgml.Compiler do
 
   @impl true
   def __compile__(key, vars, fun, opts) do
-    cache_key = NxGgml.GraphCache.key(key, vars)
+    device = NxGgml.Device.from_opts(opts)
+    cache_key = NxGgml.GraphCache.key(key, vars, device)
 
     case NxGgml.GraphCache.fetch(cache_key) do
       {:ok, lowered} ->
@@ -58,7 +64,7 @@ defmodule NxGgml.Compiler do
           end
 
           expr
-          |> then(&NxGgml.ExprLowering.build(vars, &1))
+          |> then(&NxGgml.ExprLowering.build(vars, &1, device))
           |> then(&NxGgml.GraphCache.put(cache_key, &1))
           |> run()
         rescue

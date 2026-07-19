@@ -1,10 +1,12 @@
 // NIF entrypoint, built on Fine (https://github.com/elixir-nx/fine) instead
 // of hand-rolled erl_nif.h boilerplate.
 //
-// This file owns the persistent CPU ggml_backend_t (created once at NIF
-// load, exposed to other translation units via nx_ggml_cpu_backend()) plus
-// one smoke-test NIF (cpu_add_f32) kept from Phase 2. The real
-// Nx.Defn.Expr -> ggml_cgraph lowering lives in graph_builder.cpp (Phase 3).
+// This file owns the persistent backend registry (CPU always; Vulkan too
+// when the native build was configured with NX_GGML_VULKAN=ON, i.e.
+// NX_GGML_HAVE_VULKAN is defined -- see CMakeLists.txt), exposed to other
+// translation units via nx_ggml_backend_for(device), plus one smoke-test
+// NIF (cpu_add_f32) kept from Phase 2. The real Nx.Defn.Expr ->
+// ggml_cgraph lowering lives in graph_builder.cpp (Phase 3+).
 
 #include <stdexcept>
 #include <string>
@@ -17,8 +19,15 @@
 #include "ggml-cpu.h"
 #include "ggml.h"
 
+#ifdef NX_GGML_HAVE_VULKAN
+#include "ggml-vulkan.h"
+#endif
+
 namespace {
 ggml_backend_t g_cpu_backend = nullptr;
+#ifdef NX_GGML_HAVE_VULKAN
+ggml_backend_t g_vulkan_backend = nullptr;
+#endif
 } // namespace
 
 ggml_backend_t nx_ggml_cpu_backend() {
@@ -26,6 +35,28 @@ ggml_backend_t nx_ggml_cpu_backend() {
     throw std::runtime_error("nx_ggml: CPU backend not initialized");
   }
   return g_cpu_backend;
+}
+
+ggml_backend_t nx_ggml_backend_for(const std::string &device) {
+  if (device == "cpu") {
+    return nx_ggml_cpu_backend();
+  }
+
+  if (device == "vulkan") {
+#ifdef NX_GGML_HAVE_VULKAN
+    if (g_vulkan_backend == nullptr) {
+      throw std::runtime_error(
+          "nx_ggml: Vulkan backend not initialized (no Vulkan-capable device found?)");
+    }
+    return g_vulkan_backend;
+#else
+    throw std::invalid_argument(
+        "nx_ggml: this build was compiled without Vulkan support "
+        "(rebuild with NX_GGML_VULKAN=ON)");
+#endif
+  }
+
+  throw std::invalid_argument("nx_ggml: unknown device '" + device + "'");
 }
 
 // Elementwise f32 add over raw binaries, computed via ggml's CPU backend.
@@ -85,6 +116,18 @@ fine::Term cpu_add_f32(ErlNifEnv *env, std::string_view a, std::string_view b) {
 
 FINE_NIF(cpu_add_f32, 0);
 
+// Returns true if the "vulkan" device is actually usable (compiled in and
+// a backend was successfully initialized), so Elixir tests can skip
+// gracefully on machines without a Vulkan-capable GPU instead of failing.
+bool nx_ggml_vulkan_available(ErlNifEnv *) {
+#ifdef NX_GGML_HAVE_VULKAN
+  return g_vulkan_backend != nullptr;
+#else
+  return false;
+#endif
+}
+FINE_NIF(nx_ggml_vulkan_available, 0);
+
 namespace {
 
 auto load_registration =
@@ -93,6 +136,13 @@ auto load_registration =
       if (g_cpu_backend == nullptr) {
         throw std::runtime_error("nx_ggml: ggml_backend_cpu_init failed");
       }
+
+#ifdef NX_GGML_HAVE_VULKAN
+      // Best-effort: a machine without a Vulkan-capable GPU simply leaves
+      // g_vulkan_backend null; requesting device: :vulkan then raises a
+      // clear error (nx_ggml_backend_for) rather than crashing NIF load.
+      g_vulkan_backend = ggml_backend_vk_init(0);
+#endif
     });
 
 auto unload_registration =
@@ -101,6 +151,12 @@ auto unload_registration =
         ggml_backend_free(g_cpu_backend);
         g_cpu_backend = nullptr;
       }
+#ifdef NX_GGML_HAVE_VULKAN
+      if (g_vulkan_backend != nullptr) {
+        ggml_backend_free(g_vulkan_backend);
+        g_vulkan_backend = nullptr;
+      }
+#endif
     });
 
 } // namespace
