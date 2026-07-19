@@ -86,11 +86,12 @@ atol = 2.0e-3
 rtol = 2.0e-3
 bound = Nx.add(atol, Nx.multiply(rtol, Nx.abs(expected_embd)))
 n_bad = Nx.subtract(diff, bound) |> Nx.greater(0.0) |> Nx.sum() |> Nx.to_number()
+has_nan = Nx.any(Nx.is_nan(diff)) |> Nx.to_number() == 1
 n_total = Nx.size(expected_embd)
 
 IO.puts("elements failing atol+rtol*|ref| gate: #{trunc(n_bad)} / #{n_total}")
 
-if n_bad == 0 do
+if n_bad == 0 and not has_nan do
   IO.puts("\nRESULT: PASS -- nx-ggml's DINOv3 patch embedding matches the real PyTorch reference.")
 else
   IO.puts("\nRESULT: FAIL")
