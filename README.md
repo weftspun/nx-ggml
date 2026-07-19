@@ -20,7 +20,30 @@ CPU or Vulkan GPU compute.
 
 ## Status
 
-Early bootstrap. See `native/nx_ggml/` for the C/NIF layer and `lib/nx_ggml/` for the Elixir side.
+CPU path working end-to-end (Vulkan not yet enabled — Phase 7). Any op or dtype not yet lowered
+falls back to `Nx.Defn.Evaluator` automatically, so nothing breaks; op coverage grows over time.
+See `native/nx_ggml/` for the C/NIF layer and `lib/nx_ggml/` for the Elixir side.
+
+### Dtype support
+
+Only `{:f, 32}` is lowered to ggml today. Every other dtype falls back to `Nx.Defn.Evaluator`.
+
+### Op coverage (lowered to ggml; see `lib/nx_ggml/expr_lowering.ex`)
+
+- **Elementwise binary**: `add`, `subtract`, `multiply`, `divide` (broadcasting supported)
+- **Elementwise unary**: `negate`, `abs`, `sign`, `sqrt`, `exp`, `log`, `sigmoid`, `tanh`, `sin`, `cos`
+- **Shape**: `reshape`, `squeeze`, `transpose` (any rank ≤ 4, arbitrary permutation), `broadcast`
+  (trailing-aligned case only)
+- **Linear algebra**: `dot` (standard 2-D matmul only: contract `a`'s last axis with `b`'s first
+  axis, no batch dims), `sum` (full reduction to scalar only), `clip` (literal/constant bounds only)
+
+Everything else (comparisons, `pow`, multi-axis reductions, batched/higher-rank `dot`,
+`select`/`gather`/`indexed_add`/`indexed_put`/`argmax`/`argmin`/`sort`, `triangular_solve`,
+`fft`/`ifft`, the generic `reduce` callback with an arbitrary reducer, non-f32 dtypes) currently
+falls back to `Nx.Defn.Evaluator`. Op priority so far has been grounded in real usage data —
+tallying `ggml_*` call frequency in [trellis2cpp](https://github.com/weftspun/trellis2cpp) (a
+transformer-heavy image-to-3D ggml pipeline) rather than mechanically working through the full
+`Nx.Backend` callback list.
 
 ## Installation
 
