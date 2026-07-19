@@ -16,4 +16,34 @@ defmodule NxGgml.Nif do
   def cpu_add_f32(_a, _b) do
     :erlang.nif_error(:nif_not_loaded)
   end
+
+  @doc false
+  def nx_ggml_builder_new do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_param(_builder, _shape) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_constant_f32(_builder, _shape, _data) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_add(_builder, _a, _b) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_finalize(_builder, _output_index) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_compiled_run(_compiled, _inputs) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
 end

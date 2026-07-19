@@ -14,12 +14,18 @@ defmodule NxGgml.Compiler do
   gradient rules already in Nx core, so this module never needs to
   implement backward passes.
 
-  Phase 2 status: the real `Nx.Defn.Expr` -> `ggml_cgraph` lowering lands in
-  Phase 3 (`native/nx_ggml/expr_lowering.cpp` + `graph_cache.cpp`). For now
-  `__jit__`/`__compile__` delegate to `Nx.Defn.Evaluator` (Nx's own
-  backend-agnostic tree-walking interpreter) purely so that the compiler
-  behaviour is wired up and callable end-to-end; this delegation is removed
-  once Phase 3 lands.
+  ## Phase 3 status
+
+  `NxGgml.ExprLowering` lowers a real (but intentionally small) subset of
+  ops for real: `:parameter`, `:constant`, `:add`, f32 only, and only when
+  the traced function returns a single tensor (not yet a tuple/map of
+  tensors). Anything outside that subset — an unimplemented op, an
+  unsupported dtype, or a composite (non-single-tensor) output — raises
+  `NxGgml.UnsupportedOpError`/`NxGgml.UnsupportedDTypeError`, which this
+  module catches and falls back to `Nx.Defn.Evaluator` (Nx's own
+  backend-agnostic tree-walking interpreter). This fallback is explicit and
+  intentional, not silent: it's how Phases 4-6 broaden real ggml coverage
+  incrementally without ever leaving a `defn` unable to run.
   """
 
   @behaviour Nx.Defn.Compiler
@@ -32,11 +38,52 @@ defmodule NxGgml.Compiler do
 
   @impl true
   def __jit__(key, vars, fun, args_list, opts) do
-    Nx.Defn.Evaluator.__jit__(key, vars, fun, args_list, opts)
+    __compile__(key, vars, fun, opts).(args_list)
   end
 
   @impl true
   def __compile__(key, vars, fun, opts) do
-    Nx.Defn.Evaluator.__compile__(key, vars, fun, opts)
+    cache_key = NxGgml.GraphCache.key(key, vars)
+
+    case NxGgml.GraphCache.fetch(cache_key) do
+      {:ok, lowered} ->
+        run(lowered)
+
+      :error ->
+        try do
+          expr = fun.(vars)
+
+          unless match?(%Nx.Tensor{}, expr) do
+            raise NxGgml.UnsupportedOpError, op: :composite_output
+          end
+
+          expr
+          |> then(&NxGgml.ExprLowering.build(vars, &1))
+          |> then(&NxGgml.GraphCache.put(cache_key, &1))
+          |> run()
+        rescue
+          e in [NxGgml.UnsupportedOpError, NxGgml.UnsupportedDTypeError] ->
+            _ = e
+            Nx.Defn.Evaluator.__compile__(key, vars, fun, opts)
+        end
+    end
+  end
+
+  defp run(%{compiled: compiled, out_shape: shape, out_type: type}) do
+    fn [params] ->
+      # `params` are zero-arity thunks (`(-> Nx.Tensor.t())`), matching
+      # Nx.Defn.Evaluator's own convention (see its `Enum.fetch!(...).()`
+      # usage) despite the `Nx.Defn.Compiler.__compile__/4` callback typespec
+      # reading as plain tensors.
+      binaries = Enum.map(params, fn thunk -> thunk.() |> Nx.to_binary() end)
+      result_binary = NxGgml.Nif.nx_ggml_compiled_run(compiled, binaries)
+
+      result =
+        result_binary
+        |> Nx.from_binary(type)
+        |> Nx.reshape(shape)
+
+      [result]
+    end
   end
 end

@@ -1,16 +1,11 @@
-// Phase 2 NIF skeleton, built on Fine (https://github.com/elixir-nx/fine)
-// instead of hand-rolled erl_nif.h boilerplate.
+// NIF entrypoint, built on Fine (https://github.com/elixir-nx/fine) instead
+// of hand-rolled erl_nif.h boilerplate.
 //
-// This wires up: a persistent CPU ggml_backend_t created once at NIF load
-// (backend_registry), and one real smoke-test NIF (cpu_add_f32) that
-// exercises the exact ggml-backend call sequence (context -> graph ->
-// ggml_backend_alloc_ctx_tensors -> ggml_backend_tensor_set/get ->
-// ggml_backend_graph_compute) that Phase 3's expr_lowering/graph_cache will
-// generalize into a full Nx.Defn.Expr -> ggml_cgraph lowering with proper
-// shape/dtype-signature caching. For now each call builds and tears down
-// its own tiny context, which is correct but not yet cached.
+// This file owns the persistent CPU ggml_backend_t (created once at NIF
+// load, exposed to other translation units via nx_ggml_cpu_backend()) plus
+// one smoke-test NIF (cpu_add_f32) kept from Phase 2. The real
+// Nx.Defn.Expr -> ggml_cgraph lowering lives in graph_builder.cpp (Phase 3).
 
-#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -23,22 +18,20 @@
 #include "ggml.h"
 
 namespace {
-
 ggml_backend_t g_cpu_backend = nullptr;
+} // namespace
 
-ggml_backend_t cpu_backend() {
+ggml_backend_t nx_ggml_cpu_backend() {
   if (g_cpu_backend == nullptr) {
     throw std::runtime_error("nx_ggml: CPU backend not initialized");
   }
   return g_cpu_backend;
 }
 
-} // namespace
-
 // Elementwise f32 add over raw binaries, computed via ggml's CPU backend.
 // Both binaries must have the same size and be a whole number of f32
-// elements (this is a smoke test, not the general dtype/shape-checked
-// lowering that lands in Phase 3).
+// elements. Kept as a standalone smoke test from Phase 2; the general
+// Expr-driven path is GraphBuilder/CompiledGraph in graph_builder.cpp.
 fine::Term cpu_add_f32(ErlNifEnv *env, std::string_view a, std::string_view b) {
   if (a.size() != b.size() || a.size() % sizeof(float) != 0) {
     throw std::invalid_argument(
@@ -65,7 +58,7 @@ fine::Term cpu_add_f32(ErlNifEnv *env, std::string_view a, std::string_view b) {
   ggml_build_forward_expand(graph, sum);
 
   struct ggml_backend_buffer *buffer =
-      ggml_backend_alloc_ctx_tensors(ctx, cpu_backend());
+      ggml_backend_alloc_ctx_tensors(ctx, nx_ggml_cpu_backend());
   if (!buffer) {
     ggml_free(ctx);
     throw std::runtime_error("cpu_add_f32: ggml_backend_alloc_ctx_tensors failed");
@@ -74,7 +67,7 @@ fine::Term cpu_add_f32(ErlNifEnv *env, std::string_view a, std::string_view b) {
   ggml_backend_tensor_set(ta, a.data(), 0, a.size());
   ggml_backend_tensor_set(tb, b.data(), 0, b.size());
 
-  enum ggml_status status = ggml_backend_graph_compute(cpu_backend(), graph);
+  enum ggml_status status = ggml_backend_graph_compute(nx_ggml_cpu_backend(), graph);
   if (status != GGML_STATUS_SUCCESS) {
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);

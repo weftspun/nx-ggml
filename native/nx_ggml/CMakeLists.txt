@@ -37,7 +37,7 @@ if(NOT DEFINED NX_GGML_PRIV_DIR)
     set(NX_GGML_PRIV_DIR "${CMAKE_BINARY_DIR}/priv")
 endif()
 
-add_library(nx_ggml_nif MODULE nx_ggml_nif.cpp)
+add_library(nx_ggml_nif MODULE nx_ggml_nif.cpp graph_builder.cpp)
 set_target_properties(nx_ggml_nif PROPERTIES
     OUTPUT_NAME "nx_ggml"
     PREFIX "lib"
