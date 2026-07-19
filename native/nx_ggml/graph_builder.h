@@ -31,7 +31,19 @@ public:
   int64_t add_param(const std::vector<int64_t> &shape);
   int64_t add_constant_f32(const std::vector<int64_t> &shape,
                             const std::string &data);
-  int64_t add_add(int64_t a, int64_t b);
+  int64_t add_binary(const std::string &op, int64_t a, int64_t b);
+  int64_t add_unary(const std::string &op, int64_t a);
+  // Broadcasts `a` up to `shape` (ggml_repeat); a no-op shape-wise if `a`
+  // already has that shape. Used to make every binary op's operands match
+  // the node's output shape *before* calling the ggml op, which sidesteps
+  // ggml_add/sub/mul/div's `ggml_can_repeat(b, a)` requirement entirely
+  // (no need to reason about which operand ggml wants first).
+  int64_t add_broadcast(int64_t a, const std::vector<int64_t> &shape);
+  int64_t add_reshape(int64_t a, const std::vector<int64_t> &shape);
+  // `axes[i] = j` means output axis i takes input axis j's size (Nx's
+  // row-major axis numbering) -- see the .cpp for the ne[]-reversal
+  // mapping into ggml_permute's argument convention.
+  int64_t add_transpose(int64_t a, const std::vector<int64_t> &axes);
 
 private:
   friend class CompiledGraph;

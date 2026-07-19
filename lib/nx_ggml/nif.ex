@@ -33,7 +33,27 @@ defmodule NxGgml.Nif do
   end
 
   @doc false
-  def nx_ggml_builder_add_add(_builder, _a, _b) do
+  def nx_ggml_builder_add_binary(_builder, _op, _a, _b) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_unary(_builder, _op, _a) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_broadcast(_builder, _a, _shape) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_reshape(_builder, _a, _shape) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_builder_add_transpose(_builder, _a, _axes) do
     :erlang.nif_error(:nif_not_loaded)
   end
 

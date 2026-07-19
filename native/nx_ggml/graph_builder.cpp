@@ -85,8 +85,94 @@ int64_t GraphBuilder::add_constant_f32(const std::vector<int64_t> &shape,
   return push(t);
 }
 
-int64_t GraphBuilder::add_add(int64_t a, int64_t b) {
-  ggml_tensor *result = ggml_add(ctx_, node(a), node(b));
+int64_t GraphBuilder::add_binary(const std::string &op, int64_t a, int64_t b) {
+  ggml_tensor *ta = node(a);
+  ggml_tensor *tb = node(b);
+  ggml_tensor *result;
+
+  if (op == "add") {
+    result = ggml_add(ctx_, ta, tb);
+  } else if (op == "subtract") {
+    result = ggml_sub(ctx_, ta, tb);
+  } else if (op == "multiply") {
+    result = ggml_mul(ctx_, ta, tb);
+  } else if (op == "divide") {
+    result = ggml_div(ctx_, ta, tb);
+  } else {
+    throw std::invalid_argument("nx_ggml: unknown binary op '" + op + "'");
+  }
+
+  return push(result);
+}
+
+int64_t GraphBuilder::add_unary(const std::string &op, int64_t a) {
+  ggml_tensor *ta = node(a);
+  ggml_tensor *result;
+
+  if (op == "negate") {
+    result = ggml_neg(ctx_, ta);
+  } else if (op == "abs") {
+    result = ggml_abs(ctx_, ta);
+  } else if (op == "sign") {
+    result = ggml_sgn(ctx_, ta);
+  } else if (op == "sqrt") {
+    result = ggml_sqrt(ctx_, ta);
+  } else if (op == "exp") {
+    result = ggml_exp(ctx_, ta);
+  } else if (op == "log") {
+    result = ggml_log(ctx_, ta);
+  } else if (op == "sigmoid") {
+    result = ggml_sigmoid(ctx_, ta);
+  } else if (op == "tanh") {
+    result = ggml_tanh(ctx_, ta);
+  } else if (op == "sin") {
+    result = ggml_sin(ctx_, ta);
+  } else if (op == "cos") {
+    result = ggml_cos(ctx_, ta);
+  } else {
+    throw std::invalid_argument("nx_ggml: unknown unary op '" + op + "'");
+  }
+
+  return push(result);
+}
+
+int64_t GraphBuilder::add_broadcast(int64_t a, const std::vector<int64_t> &shape) {
+  // ggml_repeat's second argument is only inspected for its shape/type, so
+  // a never-allocated, never-fed template leaf is sufficient.
+  ggml_tensor *result = ggml_repeat(ctx_, node(a), new_leaf_f32(shape));
+  return push(result);
+}
+
+int64_t GraphBuilder::add_reshape(int64_t a, const std::vector<int64_t> &shape) {
+  auto ne = to_ggml_ne(shape);
+  ggml_tensor *result = ggml_reshape_4d(ctx_, node(a), ne[0], ne[1], ne[2], ne[3]);
+  return push(result);
+}
+
+int64_t GraphBuilder::add_transpose(int64_t a, const std::vector<int64_t> &axes) {
+  int r = static_cast<int>(axes.size());
+  if (r > GGML_MAX_DIMS) {
+    throw std::invalid_argument("nx_ggml: transpose rank exceeds ggml's GGML_MAX_DIMS (4)");
+  }
+
+  // Nx's axes are in row-major axis numbering (axis 0 = outermost); ggml's
+  // ne[]/permute dims are the reverse (dim 0 = innermost). `axes[i] = j`
+  // (output Nx-axis i takes input Nx-axis j) becomes, in ggml-dim terms,
+  // "input ggml-dim (r-1-j) maps to output ggml-dim (r-1-i)". Dims beyond
+  // rank r (padding up to GGML_MAX_DIMS) are left as the identity mapping.
+  int permute_args[GGML_MAX_DIMS] = {0, 1, 2, 3};
+  for (int i = 0; i < r; i++) {
+    int input_dim = r - 1 - static_cast<int>(axes[static_cast<size_t>(i)]);
+    int output_dim = r - 1 - i;
+    permute_args[input_dim] = output_dim;
+  }
+
+  ggml_tensor *permuted = ggml_permute(ctx_, node(a), permute_args[0], permute_args[1],
+                                       permute_args[2], permute_args[3]);
+  // ggml_permute returns a (typically non-contiguous) view; materialize it
+  // so downstream ops (and the final ggml_backend_tensor_get) see a plain
+  // contiguous buffer.
+  ggml_tensor *result = ggml_cont(ctx_, permuted);
   return push(result);
 }
 
@@ -167,11 +253,35 @@ int64_t nx_ggml_builder_add_constant_f32(ErlNifEnv *,
 }
 FINE_NIF(nx_ggml_builder_add_constant_f32, 0);
 
-int64_t nx_ggml_builder_add_add(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
-                                 int64_t a, int64_t b) {
-  return builder->add_add(a, b);
+int64_t nx_ggml_builder_add_binary(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                    std::string op, int64_t a, int64_t b) {
+  return builder->add_binary(op, a, b);
 }
-FINE_NIF(nx_ggml_builder_add_add, 0);
+FINE_NIF(nx_ggml_builder_add_binary, 0);
+
+int64_t nx_ggml_builder_add_unary(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                   std::string op, int64_t a) {
+  return builder->add_unary(op, a);
+}
+FINE_NIF(nx_ggml_builder_add_unary, 0);
+
+int64_t nx_ggml_builder_add_broadcast(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                       int64_t a, std::vector<int64_t> shape) {
+  return builder->add_broadcast(a, shape);
+}
+FINE_NIF(nx_ggml_builder_add_broadcast, 0);
+
+int64_t nx_ggml_builder_add_reshape(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                     int64_t a, std::vector<int64_t> shape) {
+  return builder->add_reshape(a, shape);
+}
+FINE_NIF(nx_ggml_builder_add_reshape, 0);
+
+int64_t nx_ggml_builder_add_transpose(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                       int64_t a, std::vector<int64_t> axes) {
+  return builder->add_transpose(a, axes);
+}
+FINE_NIF(nx_ggml_builder_add_transpose, 0);
 
 fine::ResourcePtr<CompiledGraph>
 nx_ggml_builder_finalize(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
