@@ -1,5 +1,8 @@
 name = "nx_ggml_proofs"
-defaultTargets = ["RopeProof"]
+defaultTargets = ["RopeProof", "GallocrProof"]
 
 [[lean_lib]]
 name = "RopeProof"
+
+[[lean_lib]]
+name = "GallocrProof"

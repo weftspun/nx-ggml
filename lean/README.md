@@ -27,3 +27,30 @@ halves), the Elixir side builds a fixed `(head_dim × head_dim)` constant matrix
 `half` and every input vector `x : Nat → Int` (an infinite family, not a finite test set) by a plain
 induction on the dot-product recursion — `#print axioms` confirms it rests only on `propext` and
 `Quot.sound` (Lean's standard core axioms), with no `sorry`.
+
+## `GallocrProof.lean`
+
+A different kind of proof: not an algebraic identity in the op lowering, but a safety property of
+`ggml_gallocr` (ggml's graph memory allocator, `native/nx_ggml/third_party/ggml/src/ggml-alloc.c`),
+written while bisecting a real regression — switching `CompiledGraph`'s allocator from
+`ggml_backend_alloc_ctx_tensors` (one permanent buffer slot per tensor) to `ggml_gallocr` (buffer
+slots reused across non-overlapping tensors, needed because real-model graphs like TRELLIS.2's
+SS-flow DiT have ~800MB attention-score intermediates that exhaust VRAM under the naive allocator)
+made both DINOv3's 24-layer encoder and SS-flow's 30-block DiT produce wrong output. The allocator
+switch was reverted for correctness; this proof exists to narrow down *why* gallocr broke instead of
+guessing blindly at the ~1200-line C allocator.
+
+It models only the piece of `ggml-alloc.c` whose *timing* determines whether reused memory can ever
+silently corrupt a value still in use downstream: the reference-counting free-list rule at
+`ggml-alloc.c:731-820` (count every `src` reference once per node in one full pass, then free a
+tensor the instant its running per-node decrement hits that total). `Gallocr.no_premature_free`
+proves this rule can never free a tensor before its true last consumer has run — a finding that
+holds from the counting arithmetic alone, with no topological-order assumption needed. Since this
+core mechanism is proven safe, and both of its real hypotheses (topological node order from
+`ggml_build_forward_expand`; an accurate single-pass reference count) genuinely hold for every graph
+`graph_builder.cpp` builds, **the regression is not in this mechanism** — it narrows the C++
+investigation to the parts left unmodeled here: `ggml_gallocr`'s inplace-reuse heuristic (aliasing a
+node's output directly onto a parent's buffer) and its view/`n_views` handling for
+`ggml_permute`/`ggml_reshape`-produced views, both exercised heavily by `graph_builder.cpp`'s
+`add_transpose` (permute+cont) and the residual-add pattern (`x = x + ...`) used throughout every
+real-model script.
