@@ -302,27 +302,13 @@ int64_t GraphBuilder::add_conv2d(int64_t kernel, int64_t input, int64_t s0, int6
 CompiledGraph::CompiledGraph(GraphBuilder &builder, int64_t output_index) {
   output_ = builder.node(output_index);
 
-  // Inputs/outputs must be marked before allocation so ggml_gallocr knows
-  // not to recycle their buffer space as scratch for some other tensor --
-  // params_ already exist before compute starts (real inputs set in run())
-  // and pending_constants_ are read throughout the graph's lifetime, so
-  // both need GGML_TENSOR_FLAG_INPUT; the final output must survive past
-  // the last op that touches it, hence GGML_TENSOR_FLAG_OUTPUT.
-  for (ggml_tensor *param : builder.params_) {
-    ggml_set_input(param);
-  }
-  for (auto &pending : builder.pending_constants_) {
-    ggml_set_input(pending.first);
-  }
-  ggml_set_output(output_);
-
   ggml_cgraph *graph = ggml_new_graph(builder.ctx_);
   ggml_build_forward_expand(graph, output_);
 
-  ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(builder.backend_));
-  if (!ggml_gallocr_alloc_graph(galloc, graph)) {
-    ggml_gallocr_free(galloc);
-    throw std::runtime_error("nx_ggml: ggml_gallocr_alloc_graph failed");
+  ggml_backend_buffer_t buffer =
+      ggml_backend_alloc_ctx_tensors(builder.ctx_, builder.backend_);
+  if (!buffer) {
+    throw std::runtime_error("nx_ggml: ggml_backend_alloc_ctx_tensors failed");
   }
 
   for (auto &pending : builder.pending_constants_) {
@@ -334,15 +320,15 @@ CompiledGraph::CompiledGraph(GraphBuilder &builder, int64_t output_index) {
   // destructor becomes a no-op once ctx_ is nulled out here.
   ctx_ = builder.ctx_;
   backend_ = builder.backend_;
-  galloc_ = galloc;
+  buffer_ = buffer;
   graph_ = graph;
   params_ = builder.params_;
   builder.ctx_ = nullptr;
 }
 
 CompiledGraph::~CompiledGraph() {
-  if (galloc_) {
-    ggml_gallocr_free(galloc_);
+  if (buffer_) {
+    ggml_backend_buffer_free(buffer_);
   }
   if (ctx_) {
     ggml_free(ctx_);

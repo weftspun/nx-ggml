@@ -120,13 +120,7 @@ public:
 private:
   ggml_context *ctx_;
   ggml_backend_t backend_;
-  // ggml_gallocr (not the naive ggml_backend_alloc_ctx_tensors) so
-  // non-overlapping intermediate tensors share buffer space instead of each
-  // getting a permanent slot -- large graphs (e.g. a 4096-token attention
-  // score tensor, ~800MB by itself) run out of VRAM under the naive
-  // allocator well before the card's actual capacity. See graph_builder.cpp
-  // for the ggml_set_input/ggml_set_output marking this requires.
-  ggml_gallocr_t galloc_;
+  ggml_backend_buffer_t buffer_;
   ggml_cgraph *graph_;
   std::vector<ggml_tensor *> params_;
   ggml_tensor *output_;
