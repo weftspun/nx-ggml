@@ -116,6 +116,13 @@ already-supported ops (no new native code beyond `erf` itself):
   abs error `1.6e-7`, **0 / 1,053,696** elements fail the gate. This is every stage above composed into
   one compiled graph — real evidence a complete real transformer layer runs correctly through this
   backend, not just its individual sub-blocks in isolation.
+- **The full encoder** (`scratch_dino_full.exs`, all 24 transformer layers plus the final affine-free
+  LayerNorm, run end to end from the real patch embedding through to the real `cond` reference tap —
+  trellis2cpp's own name for the DINOv3 encoder's final output): max abs diff `4.3e-5`, mean abs error
+  `1.3e-6`, **0 / 1,053,696** elements fail the gate. No new lowering capability beyond `layer0` — all
+  24 layers share one compiled graph (`NxGgml.GraphCache` keys on shape/dtype/device, not tensor
+  values), replayed once per layer with that layer's own weights. This is the complete, real DINOv3
+  ViT-L/16 vision encoder running end to end through this backend on real trained weights.
 
 ## Installation
 
