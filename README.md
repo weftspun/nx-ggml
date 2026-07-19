@@ -101,6 +101,21 @@ already-supported ops (no new native code beyond `erf` itself):
   (`ggml_map_custom1` wrapping `erff()`, since ggml has no standalone erf op) — GELU has no other
   lowerable formulation in this backend, so this is real evidence the custom-op escape hatch works
   correctly against real weights, not just a synthetic case.
+- **`attention`** (`scratch_dino_attention.exs`, full multi-head self-attention with axial 2D RoPE,
+  checked against the real `l0.attention` tap): max abs diff `9.5e-6`, mean abs error `1.8e-7`,
+  **0 / 1,053,696** elements fail the gate. Needed **zero new native ops** — RoPE's "rotate half the
+  head dim" is normally a slice+concat, which this backend doesn't support, so it's instead expressed
+  as a fixed `(head_dim × head_dim)` constant matmul (`rotate_half(x) = x @ R`, where `R` is the
+  linear map for `concat(-x2, x1)` given `x = concat(x1, x2)`), and "RoPE only on patch tokens, CLS/
+  register prefix passes through" is folded into one all-token elementwise rope by giving the prefix
+  rows an identity rotation (`cos=1, sin=0`) instead of slicing a prefix back in. Multi-head attention
+  itself is entirely `transpose` + batched `dot` + the already-proven softmax composition.
+- **`layer0`** (`scratch_dino_layer0.exs`, the *entire* layer-0 transformer block — norm1 → attention
+  → layer_scale1 → residual → norm2 → MLP → layer_scale2 → residual — run end to end from the real
+  `embd` patch-embedding output and checked against the real `l0.out` tap): max abs diff `0.031`, mean
+  abs error `1.6e-7`, **0 / 1,053,696** elements fail the gate. This is every stage above composed into
+  one compiled graph — real evidence a complete real transformer layer runs correctly through this
+  backend, not just its individual sub-blocks in isolation.
 
 ## Installation
 
