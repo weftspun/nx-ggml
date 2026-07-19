@@ -11,39 +11,50 @@ DINOv3's 24-layer encoder and SS-flow's 30-block DiT produce wrong output
 (NaN / ~1000x-off values) -- see the commit reverting that switch.
 
 This does NOT model all ~1200 lines of `ggml-alloc.c` (the best-fit block
-allocator, multi-buffer support, the inplace-reuse heuristic, view/n_views
-aliasing). It models exactly the mechanism at lines 731-820: gallocr's
-"count every src reference once per node in a single full pass, then free a
-tensor the instant its running per-node decrement count hits that total" --
-the textbook reference-counting free-list liveness rule, and the one piece
-of the allocator whose *timing* (does it ever free memory a still-live
-tensor needs?) determines whether reused memory can ever silently corrupt a
-value still in use downstream.
+allocator, multi-buffer support). It models three specific mechanisms, in
+increasing order of how much they're taken on faith rather than derived:
 
-Result: the free-timing half of the mechanism is proven safe -- gallocr can
-never free a tensor before its true last consumer has executed -- and,
-found while writing the proof, this holds from the reference-counting
-arithmetic *alone* (`FreesAt` + an accurate `childCount` pre-pass): no
-topological-order assumption is needed for *this* half, so `WellFormed`
-ends up unused by `no_premature_free` below. Topological order (every
-source strictly precedes its consumer -- exactly what
-`ggml_build_forward_expand`'s post-order DFS from the single output
-guarantees) is still essential, but for the *other*, more basic half this
-file doesn't restate as a theorem: it's what makes "process nodes in index
-order" also mean "every source is already computed before its first read."
-`WellFormed` is kept as a hypothesis/definition here to document that half
-even though the Lean proof below doesn't need to invoke it.
+1. `no_premature_free` -- the base reference-counting free-list rule at
+   `ggml-alloc.c:731-820` (count every `src` reference once per node in a
+   single full pass, then free a tensor the instant its running per-node
+   decrement count hits that total).
+2. `inplace_trigger_is_last_consumer` -- the inplace-reuse heuristic's
+   trigger condition at `ggml-alloc.c:656` (`p_hn->n_children == 1`), which
+   decides when it's safe to alias a *parent's* buffer directly onto a
+   node's output instead of allocating fresh memory. `ggml_op_can_inplace`
+   (line 22) allow-lists exactly the ops `graph_builder.cpp` uses
+   pervasively for elementwise arithmetic (ADD, SUB, MUL, DIV, SQRT, LOG,
+   UNARY (covers sigmoid/tanh/exp/etc.), ROPE, RMS_NORM, SOFT_MAX) --
+   every residual add, every LayerNorm subtraction, every RoPE combine in
+   every real-model script is an inplace candidate. Matmul (`GGML_OP_MUL_MAT`)
+   is not on the list, so `add_matmul`'s outputs are never inplace targets.
+3. `view_trigger_extends_to_base` -- the view-reuse branch at
+   `ggml-alloc.c:657-669`, which lets a consumer take over a *view's*
+   underlying base tensor's memory directly (bypassing the normal
+   free-then-realloc path), exercised by every `add_transpose`
+   (`ggml_permute` + `ggml_cont`) call -- used for every Q/K/V head
+   transpose and every attention-weight transpose in every real-model
+   script. This one is NOT independently derived the way (1) and (2) are:
+   it's proven correct **conditional on** the C code's own view-bookkeeping
+   guard (`n_views`/`n_children` on both the view and its base) being
+   accurate, which requires modeling `ggml_permute`'s view-creation
+   bookkeeping in `ggml.c`/`ggml-impl.c` -- a different, larger piece of
+   the codebase this file does not model. That unverified premise is
+   flagged explicitly at the theorem.
 
-The accurate-pre-pass hypothesis (a single full scan summing every node's
-every src slot) matches `ggml-alloc.c`'s own first loop exactly, and both
-halves hold for every graph `graph_builder.cpp` builds. So the regression
-is NOT in this core mechanism -- it must be in the parts left unmodeled
-here: the inplace-reuse heuristic (reusing a *parent's* buffer directly for
-a node computed in place) or the view/`n_views` special-casing for
-`ggml_permute`/`ggml_reshape`-produced views, both exercised heavily by
-`graph_builder.cpp`'s `add_transpose` (permute+cont) and the residual-add
-pattern (`x = x + ...`) used throughout every real-model script. That
-narrows where the C++ debugging session should look next.
+Result: (1) and (2) are both proven safe from the reference-counting
+arithmetic *alone* -- no topological-order assumption is needed for
+either, a fact discovered while writing the proof (`WellFormed` ends up
+unused below; it's kept only to document the separate, more basic
+"computed before read" property that topological order actually provides,
+which this file doesn't restate as a theorem). Ruling out both the base
+mechanism and the inplace-trigger timing narrows the regression to (3)'s
+unverified premise: either ggml's own `n_views` bookkeeping has a real bug
+under this exact usage pattern, or -- outside anything a graph-liveness
+proof can reach -- one of the allow-listed ops' CPU/Vulkan kernel
+implementations doesn't actually tolerate the aliased input/output pointers
+`ggml_op_can_inplace` promises it does. Both are now the concrete next
+things to check in a C++ repro, not further Lean modeling.
 
 No external dependencies (no Mathlib), compiles standalone:
 
@@ -101,36 +112,22 @@ theorem childCount_mono (g : Graph) (k : Nat) :
       subst heq
       omega
 
-/-- gallocr frees `k` at position `j` (`j < n`) iff processing nodes
-`0 ..< j+1` has driven the running decrement count up to `k`'s TOTAL
-reference count over the whole `n`-node graph -- i.e. the first index at
-which the simulated `n_children` counter would hit zero
-(`ggml-alloc.c:798-804`, `p_hn->n_children -= 1; if (p_hn->n_children == 0)
-... free`). -/
-def FreesAt (g : Graph) (n k j : Nat) : Prop :=
-  childCount g (j + 1) k = childCount g n k ∧
-  ∀ j', j' < j → childCount g (j' + 1) k < childCount g n k
-
-/-- **Main safety theorem.** If `k` frees at position `j` (under gallocr's
-reference-counting rule) and the graph is well-formed (topological order),
-then no node strictly after `j` reads `k` as a source -- gallocr's freeing
-point is never earlier than `k`'s true last consumer, so reusing `k`'s
-memory for anything allocated after `j` can never silently overwrite a
-value some later op still needs to read. This is the exact safety property
-whose violation would explain the observed corruption (NaN / ~1000x-off
-real-model output): a tensor's buffer got reused for something else while a
-downstream op still needed to read the old value. -/
-theorem no_premature_free (g : Graph) (n k j m : Nat)
-    (_hwf : WellFormed g n) (_hj : j < n) (hfree : FreesAt g n k j)
-    (hm : m < n) (hjm : j < m) : g m k = false := by
-  -- childCount is pinned at the total for every index in [j+1, n], since it
-  -- is squeezed between the value already reached at j+1 and the value at
-  -- n (both equal the total by `hfree.1` and reflexivity/monotonicity).
+/-- **Core combinatorial lemma.** Once the running consumer count for `k`
+reaches its final total at some position `j+1`, it stays pinned at that
+total for every later position up to `n` -- so no node strictly after `j`
+can be a fresh consumer of `k` (a fresh consumer would have to strictly
+increase the count past a value that's already at its ceiling). Both
+`no_premature_free` and `inplace_trigger_is_last_consumer` below are
+one-line corollaries of this: they differ only in *how* they establish the
+"count already reached its total at j+1" hypothesis. -/
+theorem no_consumer_after_saturation (g : Graph) (n k j : Nat)
+    (_hj : j < n) (hsat : childCount g (j + 1) k = childCount g n k) :
+    ∀ m, j < m → m < n → g m k = false := by
+  intro m hjm hmn
   have hsqueeze : ∀ p, j + 1 ≤ p → p ≤ n → childCount g p k = childCount g n k := by
     intro p hp1 hp2
     have hlow : childCount g (j + 1) k ≤ childCount g p k := childCount_mono g k _ _ hp1
     have hhigh : childCount g p k ≤ childCount g n k := childCount_mono g k _ _ hp2
-    have heqtotal : childCount g (j + 1) k = childCount g n k := hfree.1
     omega
   have hm1 : childCount g m k = childCount g n k := hsqueeze m (by omega) (by omega)
   have hm2 : childCount g (m + 1) k = childCount g n k := hsqueeze (m + 1) (by omega) (by omega)
@@ -142,7 +139,127 @@ theorem no_premature_free (g : Graph) (n k j m : Nat)
     simp only [if_true] at hm2
     omega
 
+/-- gallocr frees `k` at position `j` (`j < n`) iff processing nodes
+`0 ..< j+1` has driven the running decrement count up to `k`'s TOTAL
+reference count over the whole `n`-node graph -- i.e. the first index at
+which the simulated `n_children` counter would hit zero
+(`ggml-alloc.c:798-804`, `p_hn->n_children -= 1; if (p_hn->n_children == 0)
+... free`). -/
+def FreesAt (g : Graph) (n k j : Nat) : Prop :=
+  childCount g (j + 1) k = childCount g n k ∧
+  ∀ j', j' < j → childCount g (j' + 1) k < childCount g n k
+
+/-- **Safety theorem 1: the base free-list rule.** If `k` frees at position
+`j` (under gallocr's reference-counting rule) and the graph is well-formed
+(topological order), then no node strictly after `j` reads `k` as a source
+-- gallocr's freeing point is never earlier than `k`'s true last consumer,
+so reusing `k`'s memory for anything allocated after `j` can never silently
+overwrite a value some later op still needs to read. -/
+theorem no_premature_free (g : Graph) (n k j m : Nat)
+    (_hwf : WellFormed g n) (hj : j < n) (hfree : FreesAt g n k j)
+    (hm : m < n) (hjm : j < m) : g m k = false :=
+  no_consumer_after_saturation g n k j hj hfree.1 m hjm hm
+
+/-- gallocr's live `n_children` value for `k` at the moment node `m` is
+about to be allocated -- BEFORE `m`'s own consumption of `k` (if any) gets
+decremented, matching `ggml_gallocr_allocate_node`'s inplace check
+(`ggml-alloc.c:622-680`) running *before* the "update parents" decrement
+step that comes later in the same pass (`ggml-alloc.c:792-799`). -/
+def liveChildrenAt (g : Graph) (n k m : Nat) : Nat :=
+  childCount g n k - childCount g m k
+
+/-- **Safety theorem 2: the inplace-reuse trigger.** If, at the moment node
+`m` is allocated, `k`'s live remaining-consumer count is exactly `1` (the
+`p_hn->n_children == 1` check gating the inplace-reuse branch,
+`ggml-alloc.c:656`), and `m` itself reads `k` as a source, then `m` is `k`'s
+unique remaining consumer: no other node at or after `m` also reads `k`.
+This is exactly the property inplace reuse needs -- when the C code decides
+to alias `k`'s buffer directly onto `m`'s output, `k` genuinely has no
+other future reader, so overwriting it in place cannot corrupt a value
+anything else still needs. Combined with `no_premature_free`, this rules
+out BOTH the base free-list timing and the inplace-trigger timing as the
+regression's source: every op `graph_builder.cpp` builds that's eligible
+for inplace reuse (every elementwise add/sub/mul/div/sqrt/unary, RoPE,
+RMS_NORM, softmax -- see `ggml_op_can_inplace`) only ever gets aliased onto
+a parent that has truly reached the end of its lifetime. -/
+theorem inplace_trigger_is_last_consumer (g : Graph) (n k m : Nat)
+    (hm : m < n) (hmk : g m k = true) (htrigger : liveChildrenAt g n k m = 1) :
+    ∀ m', m < m' → m' < n → g m' k = false := by
+  have hsat : childCount g (m + 1) k = childCount g n k := by
+    have hle : childCount g m k ≤ childCount g n k := childCount_mono g k m n (by omega)
+    unfold liveChildrenAt at htrigger
+    rw [childCount_succ, hmk]
+    simp only [if_true]
+    omega
+  exact no_consumer_after_saturation g n k m hm hsat
+
+/-! ### The view-reuse branch (`ggml-alloc.c:657-669`), and its unverified premise
+
+`add_transpose` (`graph_builder.cpp`) lowers to `ggml_permute` (a VIEW of
+its input -- no new memory, just reinterpreted strides) followed by
+`ggml_cont` (a fresh, contiguous copy). When some downstream node `m` reads
+that `ggml_cont` output `p` and triggers inplace reuse (theorem 2 above,
+applied to `p`), the C code has an extra branch (`ggml-alloc.c:657-669`)
+for when `p` is *itself* a view of some base tensor `v` (`view_src`): if
+`v`'s own bookkeeping shows `n_views == 1` (only `p` views it) and
+`n_children == 0` (no direct, non-view readers of `v` remain), the code
+lets `m` take over `v`'s memory address directly, marking both `p` and `v`
+as `allocated = false` without going through the normal free step.
+
+This section models that as: `m` effectively becomes a consumer of `v`
+itself, one level removed through the view `p`. The theorem below shows
+that transfer is safe *conditional on* the same two counts the C code
+itself checks being accurate -- it does NOT re-derive `n_views`/`n_children`
+for `v` and `p` from a lower-level model of `ggml_permute`'s view-creation
+bookkeeping (that lives in `ggml.c`/`ggml-impl.c`, a different and larger
+part of the codebase). That gap is the honest boundary of this file: if
+there's a real bug in how `ggml_permute`-produced views get their
+`n_views`/`n_children` counted, it's invisible here by construction. -/
+
+/-- The C code's exact view-transfer precondition
+(`ggml-alloc.c:656,660`): `p` (the view, e.g. a `ggml_cont` output whose
+*input* was a `ggml_permute` view -- but the transfer logic only cares that
+`p.view_src = some v`) has exactly one remaining child (`m`) and no other
+views; `v`, the ultimate base tensor, has exactly one view (`p`) and no
+direct children of its own. -/
+structure ViewTransferGuard (g : Graph) (n k_p k_v m : Nat) : Prop where
+  p_solely_consumed_by_m : liveChildrenAt g n k_p m = 1
+  p_reads_v : g m k_p = true
+  v_no_direct_children : childCount g n k_v = 0
+
+/-- **Safety theorem 3 (conditional): the view-reuse trigger.** Given the
+exact guard the C code checks (`ViewTransferGuard`), `m` taking over `v`'s
+memory in place of going through `p` is safe by the same
+last-consumer argument as theorem 2, *provided* `v`'s reported
+`childCount` genuinely reflects zero real readers -- which is
+`v_no_direct_children`, taken as a hypothesis here rather than derived.
+Since `v` has no direct children at all (not just "one remaining"), no
+node anywhere in the graph reads `v` directly, so -- trivially, and without
+needing `no_consumer_after_saturation` -- no node after `m` (or anywhere
+else) can read `v` as a direct source either. The real question this
+theorem can't answer is whether `v_no_direct_children` (i.e. `v`'s
+`n_children`, as bookkept elsewhere in `ggml-alloc.c`/`ggml-impl.c` for
+view-producing ops) is actually accurate for `graph_builder.cpp`'s
+`ggml_permute`+`ggml_cont` pattern -- that's exactly the unverified premise
+flagged in the section comment above. -/
+theorem view_trigger_extends_to_base (g : Graph) (n k_p k_v m : Nat)
+    (hguard : ViewTransferGuard g n k_p k_v m) :
+    ∀ m', m' < n → g m' k_v = false := by
+  intro m' hm'
+  have htotal0 : childCount g n k_v = 0 := hguard.v_no_direct_children
+  have hle : childCount g (m' + 1) k_v ≤ childCount g n k_v :=
+    childCount_mono g k_v (m' + 1) n (by omega)
+  rw [childCount_succ] at hle
+  cases hgm'kv : g m' k_v with
+  | false => rfl
+  | true =>
+    rw [hgm'kv] at hle
+    simp only [if_true] at hle
+    omega
+
 end Gallocr
 
 -- Sanity check: no `sorry`, no extra axioms beyond Lean's own kernel/`omega`.
 #print axioms Gallocr.no_premature_free
+#print axioms Gallocr.inplace_trigger_is_last_consumer
+#print axioms Gallocr.view_trigger_extends_to_base
