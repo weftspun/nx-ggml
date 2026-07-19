@@ -5,8 +5,10 @@
 // with tensor data already loaded), so there's no hand-rolled GGUF parser
 // to get wrong.
 
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <fine.hpp>
@@ -28,6 +30,48 @@ std::vector<int64_t> from_ggml_ne(const ggml_tensor *t) {
   return shape;
 }
 
+// gguf_init_from_file(no_alloc=false) loads *every* tensor's data for the
+// whole file, not just the one being asked for -- fine for a handful of
+// calls, but real per-layer validation scripts call this dozens of times
+// per file (e.g. 21 tensors x 30 blocks against one 5GB GGUF), which would
+// otherwise re-read and re-allocate the entire file from disk on every
+// single call. Cached by path for the life of the process instead: these
+// are read-only reference/weight files that don't change during a run, so
+// keeping the parsed context alive and never freeing it is a correct
+// trade of (bounded, model-file-sized) memory for avoiding that redundant
+// I/O -- appropriate for this NIF's actual use (validation scripts loading
+// a handful of distinct files), not a general-purpose cache eviction
+// policy a long-lived server would need.
+struct LoadedGguf {
+  gguf_context *gguf;
+  ggml_context *ctx;
+};
+
+std::mutex g_cache_mutex;
+std::unordered_map<std::string, LoadedGguf> g_cache;
+
+const ggml_tensor *cached_tensor(const std::string &path, const std::string &tensor_name) {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+
+  auto it = g_cache.find(path);
+  if (it == g_cache.end()) {
+    ggml_context *ctx = nullptr;
+    struct gguf_init_params params = {
+        /*.no_alloc =*/false,
+        /*.ctx      =*/&ctx,
+    };
+
+    struct gguf_context *gguf = gguf_init_from_file(path.c_str(), params);
+    if (!gguf) {
+      throw std::runtime_error("nx_ggml: failed to open GGUF file '" + path + "'");
+    }
+
+    it = g_cache.emplace(path, LoadedGguf{gguf, ctx}).first;
+  }
+
+  return it->second.ctx ? ggml_get_tensor(it->second.ctx, tensor_name.c_str()) : nullptr;
+}
+
 } // namespace
 
 // Reads a single f32 tensor by name out of a GGUF file. Raises if the file
@@ -35,36 +79,18 @@ std::vector<int64_t> from_ggml_ne(const ggml_tensor *t) {
 // deliberately narrow utility for loading models already converted with
 // --ftype 0 / f32, not a general dtype-converting GGUF reader).
 fine::Term nx_ggml_gguf_read_f32(ErlNifEnv *env, std::string path, std::string tensor_name) {
-  ggml_context *ctx = nullptr;
-  struct gguf_init_params params = {
-      /*.no_alloc =*/false,
-      /*.ctx      =*/&ctx,
-  };
-
-  struct gguf_context *gguf = gguf_init_from_file(path.c_str(), params);
-  if (!gguf) {
-    throw std::runtime_error("nx_ggml: failed to open GGUF file '" + path + "'");
-  }
-
-  struct ggml_tensor *t = ctx ? ggml_get_tensor(ctx, tensor_name.c_str()) : nullptr;
+  const ggml_tensor *t = cached_tensor(path, tensor_name);
   if (!t) {
-    gguf_free(gguf);
-    if (ctx) ggml_free(ctx);
     throw std::runtime_error("nx_ggml: tensor '" + tensor_name + "' not found in '" + path + "'");
   }
 
   if (t->type != GGML_TYPE_F32) {
-    gguf_free(gguf);
-    ggml_free(ctx);
     throw std::runtime_error("nx_ggml: tensor '" + tensor_name +
                               "' is not f32 (convert with --ftype 0)");
   }
 
   std::vector<int64_t> shape = from_ggml_ne(t);
   std::string data(static_cast<const char *>(t->data), ggml_nbytes(t));
-
-  gguf_free(gguf);
-  ggml_free(ctx);
 
   return fine::encode(env, std::make_tuple(shape, fine::Term(fine::make_new_binary(
                                                        env, data.data(), data.size()))));
