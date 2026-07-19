@@ -269,6 +269,15 @@ int64_t GraphBuilder::add_get_rows(int64_t a, int64_t b) {
   return push(result);
 }
 
+int64_t GraphBuilder::add_conv2d(int64_t kernel, int64_t input, int64_t s0, int64_t s1,
+                                  int64_t p0, int64_t p1, int64_t d0, int64_t d1) {
+  ggml_tensor *result =
+      ggml_conv_2d(ctx_, node(kernel), node(input), static_cast<int>(s0), static_cast<int>(s1),
+                   static_cast<int>(p0), static_cast<int>(p1), static_cast<int>(d0),
+                   static_cast<int>(d1));
+  return push(result);
+}
+
 CompiledGraph::CompiledGraph(GraphBuilder &builder, int64_t output_index) {
   output_ = builder.node(output_index);
 
@@ -431,6 +440,13 @@ int64_t nx_ggml_builder_add_get_rows(ErlNifEnv *, fine::ResourcePtr<GraphBuilder
   return builder->add_get_rows(a, b);
 }
 FINE_NIF(nx_ggml_builder_add_get_rows, 0);
+
+int64_t nx_ggml_builder_add_conv2d(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,
+                                    int64_t kernel, int64_t input, int64_t s0, int64_t s1,
+                                    int64_t p0, int64_t p1, int64_t d0, int64_t d1) {
+  return builder->add_conv2d(kernel, input, s0, s1, p0, p1, d0, d1);
+}
+FINE_NIF(nx_ggml_builder_add_conv2d, 0);
 
 fine::ResourcePtr<CompiledGraph>
 nx_ggml_builder_finalize(ErlNifEnv *, fine::ResourcePtr<GraphBuilder> builder,

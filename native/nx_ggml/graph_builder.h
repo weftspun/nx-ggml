@@ -82,6 +82,13 @@ public:
   // (ggml_get_rows), matching Nx.gather's common single-axis-0,
   // whole-row-selection case.
   int64_t add_get_rows(int64_t a, int64_t b);
+  // kernel is Nx shape (OC,IC,KH,KW), input is Nx shape (N,IC,IH,IW),
+  // result is Nx shape (N,OC,OH,OW) -- ggml_conv_2d's a/b/result layout
+  // comments already match Nx/PyTorch's standard conv convention exactly
+  // once reversed by to_ggml_ne, so (unlike matmul/transpose) this needed
+  // no operand-order derivation at all.
+  int64_t add_conv2d(int64_t kernel, int64_t input, int64_t s0, int64_t s1, int64_t p0,
+                      int64_t p1, int64_t d0, int64_t d1);
 
 private:
   friend class CompiledGraph;

@@ -108,6 +108,16 @@ defmodule NxGgml.Nif do
   end
 
   @doc false
+  def nx_ggml_builder_add_conv2d(_builder, _kernel, _input, _s0, _s1, _p0, _p1, _d0, _d1) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
+  def nx_ggml_gguf_read_f32(_path, _tensor_name) do
+    :erlang.nif_error(:nif_not_loaded)
+  end
+
+  @doc false
   def nx_ggml_builder_finalize(_builder, _output_index) do
     :erlang.nif_error(:nif_not_loaded)
   end

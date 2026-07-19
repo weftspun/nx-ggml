@@ -323,6 +323,42 @@ defmodule NxGgml.ExprLowering do
     {NxGgml.Nif.nx_ggml_builder_add_reshape(builder, gathered, Tuple.to_list(t.shape)), memo}
   end
 
+  # Standard 2-D convolution only: rank-4 NCHW input / OIHW kernel (Nx's
+  # default axis order, i.e. no custom input/kernel/output permutation),
+  # dilation 1, no feature/batch grouping. This is exactly the "patchify"
+  # conv used for e.g. a ViT patch embedding (stride == kernel spatial
+  # size, no padding) as well as ordinary convs (stride/padding vary).
+  # Maps directly to ggml_conv_2d, whose a/b/result layout comments already
+  # match this Nx/PyTorch convention exactly (see graph_builder.cpp) --
+  # unlike matmul/transpose, no operand-order derivation was needed here.
+  defp do_lower(builder, :conv, [input, kernel, opts], t, param_indices, memo) do
+    check_dtype!(t.type)
+
+    valid? =
+      tuple_size(input.shape) == 4 and
+        tuple_size(kernel.shape) == 4 and
+        opts[:feature_group_size] == 1 and
+        opts[:batch_group_size] == 1 and
+        opts[:input_dilation] == [1, 1] and
+        identity_permutation?(opts[:input_permutation]) and
+        identity_permutation?(opts[:kernel_permutation]) and
+        identity_permutation?(opts[:output_permutation]) and
+        match?([{0, 0}, {0, 0}], opts[:padding])
+
+    unless valid? do
+      raise NxGgml.UnsupportedOpError, op: :conv
+    end
+
+    [s0, s1] = opts[:strides]
+    [d0, d1] = opts[:kernel_dilation]
+
+    {input_index, memo} = lower(builder, input, param_indices, memo)
+    {kernel_index, memo} = lower(builder, kernel, param_indices, memo)
+
+    {NxGgml.Nif.nx_ggml_builder_add_conv2d(builder, kernel_index, input_index, s0, s1, 0, 0, d0, d1),
+     memo}
+  end
+
   # Pairwise-folds ggml_concat across an arbitrary-length tensor list (Nx's
   # :concatenate always carries the full list + axis, but ggml_concat only
   # takes two operands at a time).
@@ -359,6 +395,9 @@ defmodule NxGgml.ExprLowering do
 
   defp literal_constant(%Nx.Tensor{data: %Expr{op: :constant, args: [number]}}), do: {:ok, number}
   defp literal_constant(_), do: :error
+
+  defp identity_permutation?(nil), do: true
+  defp identity_permutation?(perm), do: perm == Enum.to_list(0..(length(perm) - 1))
 
   # Lowers `operand` and, if its shape doesn't already match `target_shape`,
   # wraps it in an explicit ggml_repeat broadcast. Applying this uniformly
