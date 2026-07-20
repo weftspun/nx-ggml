@@ -1,9 +1,130 @@
 #include "graph_builder.h"
 
+#include <algorithm>
 #include <cmath>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <unordered_map>
+#include <vector>
 
 #include "ggml-alloc.h"
+
+namespace {
+
+// Shared, grow-only per-backend allocation pool: hands out tensor storage
+// for many CompiledGraphs from a small number of large chunks
+// (ggml_backend_buft_alloc_buffer), bump-allocated within each chunk via
+// ggml's own ggml_tallocr, instead of every CompiledGraph triggering its
+// own fresh ggml_backend_alloc_ctx_tensors call.
+//
+// Why this matters: NxGgml.GraphCache caches (and never frees) every
+// distinct shape/dtype/device-keyed compiled graph for the life of the
+// process, so a workload that touches many distinct shapes (e.g. running
+// Nx's own upstream test suite through this compiler, which has enormous
+// shape diversity) ends up with one allocation per distinct graph. On the
+// Vulkan backend that's one vkAllocateMemory-class call per graph --
+// Vulkan drivers have real per-allocation overhead and commonly cap total
+// live allocations in the low thousands, so this was a genuine bottleneck,
+// not just a curiosity.
+//
+// Why this is safe (unlike the reverted ggml_gallocr attempt at solving a
+// related problem, see lean/GallocrProof.lean's postmortem): this pool
+// never reuses or frees an individual tensor's space -- it only ever grows
+// forward (a plain bump allocator), matching how CompiledGraphs already
+// live forever once cached. There is no liveness/aliasing question to get
+// wrong because nothing is ever reclaimed at fine grain.
+class BufferPool {
+public:
+  explicit BufferPool(ggml_backend_t backend) : backend_(backend) {}
+
+  ~BufferPool() {
+    for (auto &chunk : chunks_) {
+      ggml_backend_buffer_free(chunk.buffer);
+    }
+  }
+
+  BufferPool(const BufferPool &) = delete;
+  BufferPool &operator=(const BufferPool &) = delete;
+
+  // Mirrors ggml_backend_alloc_ctx_tensors_from_buft_impl + alloc_tensor_range
+  // (ggml-alloc.c) tensor-by-tensor, but bump-allocates from shared,
+  // persistent chunks instead of a fresh buffer sized exactly for this
+  // context.
+  bool alloc_ctx_tensors(ggml_context *ctx) {
+    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend_);
+
+    for (ggml_tensor *t = ggml_get_first_tensor(ctx); t != nullptr;
+         t = ggml_get_next_tensor(ctx, t)) {
+      ggml_status status = GGML_STATUS_SUCCESS;
+
+      if (t->data == nullptr) {
+        if (t->view_src == nullptr) {
+          status = alloc_one(buft, t);
+        } else if (t->buffer == nullptr) {
+          status = ggml_backend_view_init(t);
+        }
+      } else if (t->view_src != nullptr && t->buffer == nullptr) {
+        status = ggml_backend_view_init(t);
+      }
+
+      if (status != GGML_STATUS_SUCCESS) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+private:
+  // 64MB: big enough that real-model graphs (dozens of weight/activation
+  // tensors) usually fit in one chunk, small enough that a process running
+  // many thousands of tiny graphs doesn't pre-commit excessive VRAM.
+  static constexpr size_t kChunkSize = 64ull * 1024 * 1024;
+
+  struct Chunk {
+    ggml_backend_buffer_t buffer;
+    ggml_tallocr tallocr;
+  };
+
+  static size_t remaining(const Chunk &chunk) {
+    return ggml_backend_buffer_get_size(chunk.buffer) - chunk.tallocr.offset;
+  }
+
+  ggml_status alloc_one(ggml_backend_buffer_type_t buft, ggml_tensor *t) {
+    size_t size = ggml_backend_buft_get_alloc_size(buft, t);
+    size_t alignment = ggml_backend_buft_get_alignment(buft);
+    size_t padded = GGML_PAD(size, alignment);
+
+    if (chunks_.empty() || remaining(chunks_.back()) < padded) {
+      size_t chunk_size = std::max(kChunkSize, padded);
+      ggml_backend_buffer_t buffer = ggml_backend_buft_alloc_buffer(buft, chunk_size);
+      if (!buffer) {
+        return GGML_STATUS_ALLOC_FAILED;
+      }
+      chunks_.push_back(Chunk{buffer, ggml_tallocr_new(buffer)});
+    }
+
+    return ggml_tallocr_alloc(&chunks_.back().tallocr, t);
+  }
+
+  ggml_backend_t backend_;
+  std::vector<Chunk> chunks_;
+};
+
+std::mutex g_pool_mutex;
+std::unordered_map<ggml_backend_t, std::unique_ptr<BufferPool>> g_pools;
+
+BufferPool &pool_for(ggml_backend_t backend) {
+  std::lock_guard<std::mutex> lock(g_pool_mutex);
+  auto it = g_pools.find(backend);
+  if (it == g_pools.end()) {
+    it = g_pools.emplace(backend, std::make_unique<BufferPool>(backend)).first;
+  }
+  return *it->second;
+}
+
+} // namespace
 
 namespace {
 
@@ -305,10 +426,15 @@ CompiledGraph::CompiledGraph(GraphBuilder &builder, int64_t output_index) {
   ggml_cgraph *graph = ggml_new_graph(builder.ctx_);
   ggml_build_forward_expand(graph, output_);
 
-  ggml_backend_buffer_t buffer =
-      ggml_backend_alloc_ctx_tensors(builder.ctx_, builder.backend_);
-  if (!buffer) {
-    throw std::runtime_error("nx_ggml: ggml_backend_alloc_ctx_tensors failed");
+  // Allocates this graph's tensors from the shared, per-backend BufferPool
+  // (bump-allocated from a small number of large chunks) instead of a
+  // fresh ggml_backend_alloc_ctx_tensors buffer sized exactly for this one
+  // graph -- see BufferPool's comment for why (Vulkan per-allocation
+  // overhead/caps, GraphCache never freeing distinct compiled graphs).
+  // The pool itself, not this CompiledGraph, owns the underlying chunk
+  // buffers, so there's nothing for this instance to free on destruction.
+  if (!pool_for(builder.backend_).alloc_ctx_tensors(builder.ctx_)) {
+    throw std::runtime_error("nx_ggml: BufferPool::alloc_ctx_tensors failed");
   }
 
   for (auto &pending : builder.pending_constants_) {
@@ -320,16 +446,12 @@ CompiledGraph::CompiledGraph(GraphBuilder &builder, int64_t output_index) {
   // destructor becomes a no-op once ctx_ is nulled out here.
   ctx_ = builder.ctx_;
   backend_ = builder.backend_;
-  buffer_ = buffer;
   graph_ = graph;
   params_ = builder.params_;
   builder.ctx_ = nullptr;
 }
 
 CompiledGraph::~CompiledGraph() {
-  if (buffer_) {
-    ggml_backend_buffer_free(buffer_);
-  }
   if (ctx_) {
     ggml_free(ctx_);
   }

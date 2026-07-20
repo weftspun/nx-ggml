@@ -118,9 +118,11 @@ public:
   std::string run(const std::vector<std::string> &inputs);
 
 private:
+  // No buffer_/allocator field: tensor storage comes from a shared,
+  // process-lifetime BufferPool (graph_builder.cpp) keyed by backend, not
+  // an allocation owned by this instance -- see the constructor.
   ggml_context *ctx_;
   ggml_backend_t backend_;
-  ggml_backend_buffer_t buffer_;
   ggml_cgraph *graph_;
   std::vector<ggml_tensor *> params_;
   ggml_tensor *output_;
