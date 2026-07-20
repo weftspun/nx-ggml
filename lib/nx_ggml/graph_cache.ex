@@ -15,9 +15,19 @@ defmodule NxGgml.GraphCache do
   per signature, then only re-run the cached native graph on repeat calls.
   """
 
-  @doc "Builds a cache key from the compiler's opaque `key`, the traced `vars`, and the device."
+  @doc """
+  Builds a cache key from the compiler's opaque `key`, the traced `vars`,
+  and the device. `vars` mirrors the original `defn`'s arity, so a
+  composite argument (a tuple/map, or a `Nx.Container`-implementing struct
+  like `Axon.ModelState`) appears as one nested element, not a flat
+  tensor -- flattened via `Nx.Defn.Composite.flatten_list/1` first (the
+  same leaf ordering `expr`'s `:parameter` node indices and the runtime
+  `params` list use) so every leaf actually has a `.shape`/`.type` to key
+  on.
+  """
   def key(key, vars, device) do
-    {key, Enum.map(vars, &{&1.shape, &1.type}), device}
+    flat_vars = Nx.Defn.Composite.flatten_list(vars)
+    {key, Enum.map(flat_vars, &{&1.shape, &1.type}), device}
   end
 
   @doc "Looks up a previously-cached lowered graph, or `:error` on a miss."

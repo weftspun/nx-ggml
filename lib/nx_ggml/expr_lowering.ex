@@ -46,8 +46,17 @@ defmodule NxGgml.ExprLowering do
     builder = NxGgml.Nif.nx_ggml_builder_new(device)
     index_positions = gather_index_positions(expr)
 
+    # `vars` mirrors the original defn's arity, so a composite argument (a
+    # tuple/map, or a Nx.Container-implementing struct like
+    # Axon.ModelState -- exactly what Axon.build/2's params argument is)
+    # appears as one nested element, not a flat tensor. Flatten first: this
+    # is the same leaf ordering `expr`'s `:parameter` node indices (and the
+    # runtime `params` list Compiler.run/1 receives) use, per
+    # Nx.Defn.Evaluator's own `Enum.fetch!(state.params, i)` convention.
+    flat_vars = Nx.Defn.Composite.flatten_list(vars)
+
     param_indices =
-      Enum.with_index(vars)
+      Enum.with_index(flat_vars)
       |> Enum.map(fn {var, pos} ->
         shape = Tuple.to_list(var.shape)
 
