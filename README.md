@@ -73,6 +73,11 @@ list.
 
 ### Validated against a real model, with real trained weights
 
+The `scratch_dino_*.exs`/`scratch_ssflow.exs` validation scripts referenced below have moved to a
+separate sibling project, [`trellis2_ex`](../trellis2_ex) (depends on this repo via a `mix` git
+dependency) — nx-ggml itself stays a general-purpose `Nx.Defn` → ggml compiler with no model-specific
+code. The results described here are unchanged by the move; only the scripts' location did.
+
 `scratch_dino_patch_embed.exs` ports trellis2cpp's DINOv3 ViT-L/16 **patch embedding** stage
 (patch conv → bias → CLS/register token concat — the first neural stage of the pipeline) to
 Elixir/`Nx.Defn`, loads the real downloaded DINOv3 weights (converted to GGUF the same way
