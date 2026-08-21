@@ -27,7 +27,7 @@ layer and `lib/nx_ggml/` for the Elixir side.
 
 ### Dtype support
 
-`{:f, 32}` for all compute. `{:s, 32}` is also supported, but *only* for a defn parameter that is
+`{:f, 32}` for all compute. `{:s, 32}` is also supported, but _only_ for a defn parameter that is
 used exclusively as `gather`'s index operand (see below) — never for general arithmetic, and never
 for a bare `{:s, 32}` constant (which is always re-encoded as f32 regardless of its traced dtype,
 since a `:constant` node is just a number, not real tensor data — this is what makes `Nx.mean` work,
@@ -52,7 +52,7 @@ f32 sum). Every other dtype, and any non-gather-index use of `{:s, 32}`, falls b
   not a raw primitive), `reduce_max` (last axis only, via `ggml_pool_1d`'s global max-pool — ggml
   has no dedicated row-max reduction op), `clip` (literal/constant bounds only)
 - **Indexed**: `gather` (embedding-lookup shape only: a 2-D `(vocab, dim)` table, gathering whole
-  rows by an `{:s, 32}` index tensor that is *directly* a defn parameter — not a computed
+  rows by an `{:s, 32}` index tensor that is _directly_ a defn parameter — not a computed
   expression, and not Nx's fully general nd-index semantics)
 - **`conv`** (`ggml_conv_2d`): standard rank-4 NCHW input / OIHW kernel only (Nx's default axis
   order), dilation 1, no feature/batch grouping — covers both ordinary convs and "patchify" convs
@@ -115,7 +115,7 @@ already-supported ops (no new native code beyond `erf` itself):
   register prefix passes through" is folded into one all-token elementwise rope by giving the prefix
   rows an identity rotation (`cos=1, sin=0`) instead of slicing a prefix back in. Multi-head attention
   itself is entirely `transpose` + batched `dot` + the already-proven softmax composition.
-- **`layer0`** (`scratch_dino_layer0.exs`, the *entire* layer-0 transformer block — norm1 → attention
+- **`layer0`** (`scratch_dino_layer0.exs`, the _entire_ layer-0 transformer block — norm1 → attention
   → layer_scale1 → residual → norm2 → MLP → layer_scale2 → residual — run end to end from the real
   `embd` patch-embedding output and checked against the real `l0.out` tap): max abs diff `0.031`, mean
   abs error `1.6e-7`, **0 / 1,053,696** elements fail the gate. This is every stage above composed into

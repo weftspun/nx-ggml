@@ -5,7 +5,7 @@ lowering — a correctness-verification tool used only while developing/reviewin
 spirit of `plausible-witness-dag`'s escalating-verification idea (see the project plan). **Lean is
 not a runtime dependency**: nothing here is called during actual tensor computation, no NIF touches
 it, and `mix compile`/`mix test` never invoke it. It exists purely so a claim like "this constant
-matmul is *exactly* equivalent to a slice+negate+concat, for every input, not just the vectors we
+matmul is _exactly_ equivalent to a slice+negate+concat, for every input, not just the vectors we
 happened to test" can be checked algebraically instead of only empirically.
 
 No Mathlib dependency — everything is built from plain Lean 4 core plus the `omega` tactic that
@@ -37,7 +37,7 @@ written while bisecting a real regression — switching `CompiledGraph`'s alloca
 slots reused across non-overlapping tensors, needed because real-model graphs like TRELLIS.2's
 SS-flow DiT have ~800MB attention-score intermediates that exhaust VRAM under the naive allocator)
 made both DINOv3's 24-layer encoder and SS-flow's 30-block DiT produce wrong output. The allocator
-switch was reverted for correctness; this proof exists to narrow down *why* gallocr broke instead of
+switch was reverted for correctness; this proof exists to narrow down _why_ gallocr broke instead of
 guessing blindly at the ~1200-line C allocator.
 
 It models three specific mechanisms in `ggml-alloc.c`, in increasing order of how much is taken on
